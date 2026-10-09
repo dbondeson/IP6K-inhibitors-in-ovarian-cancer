@@ -1,0 +1,746 @@
+---
+title: "Figure 2 and Extended Data Figure 3: PRISM chemogenetic profiling of XPR1 and IP6K inhibitors"
+author: "Daniel Bondeson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+---
+
+This document regenerates the PRISM panels of Figure 2 (2D-F) and Extended Data Figure 3
+(3B-F) from the Figshare dataset, writes a source-data workbook, and prints each recomputed
+number next to its published value. See `README.md`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = FALSE,
+                      fig.path = file.path(tempdir(), "fig2-"))   # keep knit chunk images out of the repo
+```
+
+# Setup
+
+```{r packages}
+library(tidyverse)
+library(here)
+library(scales)
+library(ggrepel)
+library(ggrastr)    # rasterised point clouds in Fig 2F
+library(ggdist)     # half violins in Fig 2E
+library(patchwork)
+library(broom)
+library(writexl)
+
+dir.create(here("results"), showWarnings = FALSE)
+
+# The DepMap tables have one column per gene, so a single line is several hundred kilobytes
+Sys.setenv(VROOM_CONNECTION_SIZE = 2^26)
+
+# Input files come from the Figshare dataset (see data/README.md). They are read from
+# data/ unless FIG2_DATA_DIR points elsewhere.
+data_dir <- Sys.getenv("FIG2_DATA_DIR", unset = here("data"))
+data_path <- function(...) file.path(data_dir, ...)
+
+publication_theme <- theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title   = element_text(face = "bold", size = 12),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9),
+    strip.text   = element_text(face = "bold", size = 10),
+    legend.title = element_text(face = "bold", size = 9),
+    legend.text  = element_text(size = 8)
+  )
+
+drug_colors <- c("RBD27" = "#d94801", "SC919" = "darkcyan")
+
+save_fig <- function(plot, file, width, height) {
+  ggsave(here("results", file), plot = plot, width = width, height = height, units = "in")
+  invisible(plot)
+}
+
+# Comparison table: every recomputed number next to its published value
+checks <- list()
+add_check <- function(panel, quantity, recomputed, expected, source, tol = NA, exact = FALSE) {
+  ok <- if (exact) identical(as.character(recomputed), as.character(expected))
+        else if (is.na(tol)) isTRUE(all.equal(recomputed, expected, tolerance = 1e-3))
+        else abs(recomputed - expected) <= tol
+  checks[[length(checks) + 1]] <<- tibble(
+    panel = panel, quantity = quantity,
+    recomputed = as.character(if (is.numeric(recomputed)) signif(recomputed, 5) else recomputed),
+    expected = as.character(expected), source = source, match = ok)
+}
+
+# Genes of ED Fig 3B and 3E: phosphate transport, XPR1 and inositol pyrophosphate metabolism
+phosphate_genes <- c("PAX8", "SLC34A1", "SLC34A2", "SLC34A3", "SLC20A1", "SLC20A2", "XPR1", "KIDINS220",
+                     "IPMK", "IPPK", "IP6K1", "IP6K2", "IP6K3", "PPIP5K1", "PPIP5K2", "NUDT3", "NUDT4")
+```
+
+# From Sushi output to sensitivity
+
+The PRISM screen (project 24_PSEQ_BOND_01) was processed with the CMAP Sushi pipeline
+(<https://github.com/theprismlab/sushi>, commit `5be4ec2`, default settings; see
+`sushi_inputs/config.json`). Sushi filters the barcode counts to the PRISM cell lines, normalizes
+each PCR well with ten spiked-in control barcodes, and computes the log2 fold change of every
+treated well against the vehicle wells. Its inputs and every intermediate table are in the
+dataset. Everything below starts from those tables.
+
+```{r sushi_tables}
+read_sushi <- function(f) read_csv(data_path("sushi_outputs", f), show_col_types = FALSE)
+
+filtered_counts <- read_sushi("filtered_counts.csv")
+normalized      <- read_sushi("normalized_counts.csv")
+l2fc_sushi      <- read_sushi("l2fc.csv")
+collapsed       <- read_sushi("collapsed_l2fc.csv")
+annotations     <- read_csv(data_path("PRISM_cell_line_annotations.csv"), show_col_types = FALSE)
+
+c(cell_lines = n_distinct(collapsed$DepMap_ID), conditions = n_distinct(collapsed$sig_id))
+```
+
+## Check: log2 fold changes recomputed from the normalized counts
+
+Sushi's step from normalized counts to fold change is simple, so it is repeated here as a check.
+Technical replicates (three PCR wells per condition) are averaged, and each cell line's value
+is divided by the median of its vehicle wells.
+
+```{r l2fc_check}
+tech_means <- normalized %>%
+  filter(is.na(Name), !(trt_type %in% c("empty", "CB_only"))) %>%     # cell line barcodes only
+  group_by(DepMap_ID, trt_type, cell_set, treatment, dose, dose_unit, day, bio_rep) %>%
+  summarise(mean_normalized_n = mean(normalized_n), .groups = "drop")
+
+vehicle <- tech_means %>% filter(trt_type == "negcon") %>%
+  group_by(DepMap_ID, cell_set, day) %>%
+  summarise(control_median_normalized_n = median(mean_normalized_n), .groups = "drop")
+
+l2fc_here <- tech_means %>% filter(trt_type != "negcon") %>%
+  inner_join(vehicle, by = c("DepMap_ID", "cell_set", "day")) %>%
+  mutate(l2fc_recomputed = log2(mean_normalized_n) - log2(control_median_normalized_n))
+
+l2fc_compare <- l2fc_sushi %>%
+  select(DepMap_ID, cell_set, treatment, dose, dose_unit, day, bio_rep, l2fc_sushi = l2fc) %>%
+  inner_join(l2fc_here %>% select(DepMap_ID, cell_set, treatment, dose, dose_unit, day, bio_rep, l2fc_recomputed),
+             by = c("DepMap_ID", "cell_set", "treatment", "dose", "dose_unit", "day", "bio_rep"))
+
+add_check("Sushi", "fold changes recomputed from normalized counts: max |difference| over all conditions",
+          max(abs(l2fc_compare$l2fc_sushi - l2fc_compare$l2fc_recomputed)), 0, "Sushi l2fc.csv", tol = 1e-8)
+add_check("Sushi", "fold changes compared (of those in l2fc.csv)", nrow(l2fc_compare), nrow(l2fc_sushi),
+          "Sushi l2fc.csv", exact = TRUE)
+```
+
+## Sensitivity: fold change at each dose and area under the dose-response curve
+
+The reported fold change of a cell line at a dose is Sushi's `median_l2fc`. The **AUC** is the mean,
+over the doses of a drug, of the fold change capped at 1: `mean(min(2^l2fc, 1))`. A cell line that
+is unaffected has an AUC of 1, one that is eliminated at every dose has an AUC near 0. RBD27 was
+tested at three doses (220, 670, 2000 nM), SC919 at four (100, 300, 1000, 3000 nM).
+
+```{r sensitivity}
+dose_wide <- collapsed %>%
+  mutate(sig = paste(treatment, dose, "nM", sep = ":")) %>%
+  select(DepMap_ID, sig, median_l2fc) %>%
+  pivot_wider(names_from = sig, values_from = median_l2fc)
+
+auc_wide <- collapsed %>%
+  group_by(DepMap_ID, treatment) %>%
+  summarise(auc = mean(pmin(2^median_l2fc, 1)), n_doses = n(), .groups = "drop") %>%
+  mutate(sig = paste0(treatment, ":auc")) %>%
+  select(DepMap_ID, sig, auc) %>%
+  pivot_wider(names_from = sig, values_from = auc)
+
+prism_auc <- annotations %>%
+  rename(ModelID = ModelID) %>%
+  left_join(dose_wide, by = c("ModelID" = "DepMap_ID")) %>%
+  left_join(auc_wide,  by = c("ModelID" = "DepMap_ID")) %>%
+  select(ModelID, CCLE_name, StrippedCellLineName, lineage, disease,
+         `RBD27:220:nM`, `RBD27:670:nM`, `RBD27:2000:nM`, `RBD27:auc`,
+         `SC919:100:nM`, `SC919:300:nM`, `SC919:1000:nM`, `SC919:3000:nM`, `SC919:auc`)
+
+stopifnot(nrow(prism_auc) == 475, !anyNA(prism_auc))
+write_csv(prism_auc, here("results", "PRISM_sensitivity_by_cell_line.csv"))
+add_check("Fig 2C", "cell lines screened", nrow(prism_auc), 475, "Fig 2C legend", exact = TRUE)
+summary(prism_auc[c("RBD27:auc", "SC919:auc")])
+```
+
+## Fig ED3C: recovery of the cell lines in each PCR well
+
+Each cell line is detected by its barcode. A line counts as missing from a well when it has no
+reads there; wells with 40 or fewer reads are flagged as low (the `COUNT_THRESHOLD` of Sushi).
+The collection of cell lines is split over two pools for PCR and sequencing.
+
+```{r ed3c, fig.height=3.5, fig.width=3.4}
+RECOVERY_THRESHOLD <- 40
+
+recovery <- filtered_counts %>%
+  filter(is.na(Name)) %>%                                  # cell lines, not control barcodes
+  group_by(pcr_plate, pcr_well, cell_set) %>%
+  summarise(total_num_cls = n(),
+            not_detected = sum(n == 0),
+            low_counts = sum(n > 0 & n <= RECOVERY_THRESHOLD),
+            detected = sum(n > RECOVERY_THRESHOLD), .groups = "drop") %>%
+  # Pool 1 is the smaller of the two pools, as on the published panel
+  mutate(pool = paste0(if_else(total_num_cls == min(total_num_cls), "Pool 1", "Pool 2"),
+                       ": ", total_num_cls, " cell lines"))
+recovery %>% count(cell_set, total_num_cls, pool)
+
+ed3c <- recovery %>%
+  mutate(pcr_well = factor(pcr_well, levels = rev(sort(unique(pcr_well))))) %>%
+  ggplot(aes(not_detected, pcr_well)) +
+  geom_col(fill = "#d73027", width = 0.8) +
+  scale_x_continuous(breaks = c(0, 2, 4), expand = expansion(mult = c(0, 0.1))) +
+  facet_wrap(~ pool, scales = "free_y", ncol = 2) +
+  labs(x = "Missing Cell Lines", y = "PCR Well") +
+  theme_classic(base_size = 9) +
+  theme(axis.text.y = element_text(size = 5.5), strip.text = element_text(size = 7, face = "bold"),
+        strip.background = element_rect(fill = "grey90", color = NA), panel.spacing = unit(0.3, "lines"))
+ed3c
+save_fig(ed3c, "ed3c_cell_line_recovery.pdf", 3.4, 3.5)
+
+add_check("ED Fig 3C", "most cell lines missing from any PCR well", max(recovery$not_detected), 5,
+          "ED Fig 3C legend: 5 or fewer", tol = 0)
+
+add_check("ED Fig 3C", "cell lines in pool 1 and pool 2", paste(sort(unique(recovery$total_num_cls)), collapse = " / "),
+          "236 / 241", "ED Fig 3C panel", exact = TRUE)
+```
+
+
+
+# Molecular data: DepMap Public 25Q3
+
+mRNA expression and CRISPR gene effect (Chronos) come from the public DepMap 25Q3 release
+(<https://depmap.org>, CC BY 4.0). The dataset holds the cell lines of the PRISM screen only,
+except for the table of pathway genes used in ED Fig 3B, which covers every model. Of the 475
+screened lines, 472 have an expression profile and 400 have CRISPR data.
+
+```{r depmap}
+strip_entrez <- function(df) rename_with(df, ~ str_remove(.x, " \\(.*\\)"), -ModelID)
+
+expression <- read_csv(data_path("DepMap_25Q3_mRNA_expression_log2TPMp1_PRISM_cell_lines.csv.gz"),
+                       show_col_types = FALSE) %>% strip_entrez()
+crispr <- read_csv(data_path("DepMap_25Q3_CRISPR_Chronos_gene_effect_PRISM_cell_lines.csv.gz"),
+                   show_col_types = FALSE) %>% strip_entrez()
+crispr_pathway <- read_csv(data_path("DepMap_25Q3_CRISPR_Chronos_pathway_genes_all_models.csv"),
+                           show_col_types = FALSE) %>% strip_entrez()
+biomarkers <- read_csv(data_path("PRISM_AUC_biomarker_correlations_DepMap25Q3_and_repurposing.csv"),
+                       show_col_types = FALSE)
+
+c(expression_lines = nrow(expression), expression_genes = ncol(expression) - 1,
+  crispr_lines = nrow(crispr), crispr_genes = ncol(crispr) - 1)
+```
+
+# Fig 2D and 2E: sensitivity by SLC34A2 expression and lineage
+
+Cell lines are divided by lineage (gynecologic = ovary/fallopian tube and uterus, against all
+others) and by SLC34A2 mRNA expression (high above 4 log2(TPM+1), low otherwise). An absolute
+threshold is used because most cell lines do not express SLC34A2 at all, so a median split
+outside gynecologic tissue would separate no expression from no expression.
+
+```{r slc_groups}
+SLC34A2_THRESHOLD <- 4   # log2(TPM+1)
+
+slc_df <- prism_auc %>%
+  inner_join(expression %>% select(ModelID, SLC34A2), by = "ModelID") %>%
+  drop_na(SLC34A2) %>%
+  mutate(
+    lin = if_else(lineage %in% c("Ovary/Fallopian Tube", "Uterus"), "Gyn.", "Other"),
+    slc = if_else(SLC34A2 > SLC34A2_THRESHOLD, "SLC34A2-high", "SLC34A2-low"),
+    # Fig 2D draws in this order so grey sits at the back and green on top
+    Category = factor(paste(lin, slc), levels = c("Other SLC34A2-low", "Gyn. SLC34A2-low",
+                                                  "Other SLC34A2-high", "Gyn. SLC34A2-high")),
+    # Fig 2E facets in reading order
+    Group = factor(paste(lin, slc, sep = "\n"),
+                   levels = c("Gyn.\nSLC34A2-high", "Gyn.\nSLC34A2-low",
+                              "Other\nSLC34A2-high", "Other\nSLC34A2-low"))) %>%
+  arrange(Category)
+
+# palette of the Fig 2C cartoon: green, blue, purple, grey
+slc_cat_colors <- c("Gyn. SLC34A2-high" = "#32a354", "Gyn. SLC34A2-low" = "#4292c6",
+                    "Other SLC34A2-high" = "#756bb0", "Other SLC34A2-low" = "#BDBDBD")
+
+slc_counts <- table(slc_df$Category)
+slc_counts
+add_check("Fig 2D", "cell lines with an expression profile", nrow(slc_df), 472, "Fig 2C legend, Methods", exact = TRUE)
+for (g in c("Gyn. SLC34A2-high", "Other SLC34A2-high", "Gyn. SLC34A2-low", "Other SLC34A2-low")) {
+  add_check("Fig 2D", paste("cell lines,", g), unname(slc_counts[g]),
+            c("Gyn. SLC34A2-high" = 16, "Other SLC34A2-high" = 12, "Gyn. SLC34A2-low" = 36, "Other SLC34A2-low" = 408)[[g]],
+            "Fig 2D panel", exact = TRUE)
+}
+```
+
+## Fig 2D
+
+```{r fig2d, fig.height=3.4, fig.width=3.4}
+r_2d <- cor(slc_df$`RBD27:auc`, slc_df$`SC919:auc`)
+p_2d <- cor.test(slc_df$`RBD27:auc`, slc_df$`SC919:auc`)$p.value
+
+fig_2d_legend <- tibble(
+  Category = factor(c("Gyn. SLC34A2-high", "Other SLC34A2-high", "Gyn. SLC34A2-low", "Other SLC34A2-low"),
+                    levels = levels(slc_df$Category)),
+  label = sprintf("%s (%d)", c("Gyn", "Other", "Gyn", "Other"),
+                  slc_counts[c("Gyn. SLC34A2-high", "Other SLC34A2-high", "Gyn. SLC34A2-low", "Other SLC34A2-low")]),
+  x = c(0.40, 0.68, 0.40, 0.68), y = c(1.18, 1.18, 1.09, 1.09))
+fig_2d_header <- tibble(x = c(0.02, 0.02), y = c(1.18, 1.09), label = c("SLC34A2 high:", "SLC34A2 low:"))
+
+fig_2d <- ggplot(slc_df, aes(`RBD27:auc`, `SC919:auc`)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.6) +
+  geom_point(aes(fill = Category, color = Category), shape = 21, size = 2.2, stroke = 0.25, alpha = 0.9) +
+  geom_text(data = fig_2d_header, aes(x = x, y = y, label = label), inherit.aes = FALSE,
+            hjust = 0, fontface = "bold", size = 2.8, color = "grey20") +
+  geom_text(data = fig_2d_legend, aes(x = x, y = y, label = label, color = Category), inherit.aes = FALSE,
+            hjust = 0, fontface = "bold", size = 2.8) +
+  annotate("label", x = 0.03, y = 0.95, hjust = 0, vjust = 1,
+           label = sprintf("R = %.2f\np < 0.001", r_2d), size = 3, fontface = "bold", fill = "white") +
+  scale_fill_manual(values = slc_cat_colors) +
+  scale_color_manual(values = c(slc_cat_colors[1:3], "Other SLC34A2-low" = "grey65")) +
+  scale_x_continuous(breaks = seq(0, 1, 0.25), expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), expand = c(0, 0)) +
+  coord_cartesian(xlim = c(0, 1.02), ylim = c(0, 1.02), clip = "off") +
+  labs(x = "RBD27 sensitivity (AUC)", y = "SC919 sensitivity (AUC)") +
+  publication_theme +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = drug_colors["RBD27"], face = "bold"),
+        axis.title.y = element_text(color = drug_colors["SC919"], face = "bold"),
+        plot.margin = margin(t = 34, r = 8, b = 6, l = 6))
+fig_2d
+save_fig(fig_2d, "fig2d_RBD27_vs_SC919_AUC.pdf", 3.4, 3.4)
+
+add_check("Fig 2D", "Pearson R, RBD27 against SC919 AUC", r_2d, 0.81, "Fig 2D panel; Results", tol = 0.005)
+add_check("Fig 2D", "p < 0.001", p_2d < 0.001, TRUE, "Fig 2D panel", exact = TRUE)
+```
+
+## Fig 2E
+
+Each group is compared with the reference group (other lineages, SLC34A2-low) by a two-sided
+Mann-Whitney U test, separately for each drug.
+
+```{r fig2e, fig.height=4.4, fig.width=5.2}
+slc_long <- slc_df %>%
+  select(ModelID, Group, lin, slc, SLC34A2, `RBD27:auc`, `SC919:auc`) %>%
+  pivot_longer(c(`RBD27:auc`, `SC919:auc`), names_to = "Drug", values_to = "AUC") %>%
+  mutate(Drug = str_remove(Drug, ":auc"))
+
+SLC_REF <- "Other\nSLC34A2-low"
+slc_pvals <- slc_long %>%
+  filter(Group != SLC_REF) %>%
+  group_by(Drug, Group) %>%
+  summarise(p = wilcox.test(AUC, slc_long$AUC[slc_long$Group == SLC_REF & slc_long$Drug == first(Drug)],
+                            exact = FALSE) %>% tidy() %>% pull(p.value), .groups = "drop") %>%
+  mutate(lab = if_else(p < 1e-4, format(p, digits = 2, scientific = TRUE),
+                       format(round(p, 4), scientific = FALSE, trim = TRUE)))
+
+slc_summary <- slc_long %>%
+  group_by(Group, Drug) %>%
+  summarise(n = n(), median_AUC = round(median(AUC), 3), .groups = "drop") %>%
+  left_join(slc_pvals %>% select(Group, Drug, p_vs_reference = p), by = c("Group", "Drug")) %>%
+  mutate(Group = str_replace(Group, "\n", " "))
+slc_summary
+
+pv_pos <- slc_pvals %>%
+  mutate(x = as.numeric(factor(Group, levels = levels(slc_df$Group))),
+         y = if_else(Drug == "RBD27", -0.14, -0.24))
+
+fig_2e <- ggplot(slc_long, aes(Group, AUC, fill = Drug, color = Drug)) +
+  geom_hline(yintercept = 1, color = "black", linewidth = 0.4) +
+  stat_slab(data = ~filter(.x, Drug == "RBD27"), side = "left", scale = 0.45, normalize = "groups",
+            alpha = 0.55, color = "grey30", linewidth = 0.3) +
+  stat_slab(data = ~filter(.x, Drug == "SC919"), side = "right", scale = 0.45, normalize = "groups",
+            alpha = 0.55, color = "grey30", linewidth = 0.3) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.09, dodge.width = 0.32, seed = 1),
+             size = 1.1, alpha = 0.75) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.22, linewidth = 0.35, color = "black",
+               position = position_dodge(width = 0.32), show.legend = FALSE) +
+  geom_text(data = pv_pos, aes(x = x, y = y, label = lab, color = Drug), inherit.aes = FALSE,
+            size = 2.9, fontface = "bold") +
+  annotate("text", x = 4, y = -0.14, label = "ref", color = drug_colors["RBD27"], size = 2.9, fontface = "bold") +
+  annotate("text", x = 4, y = -0.24, label = "ref", color = drug_colors["SC919"], size = 2.9, fontface = "bold") +
+  annotate("text", x = 0.72, y = 1.10, label = "RBD27", hjust = 0, color = drug_colors["RBD27"],
+           fontface = "bold", size = 4.2) +
+  annotate("text", x = 1.55, y = 1.10, label = "SC919", hjust = 0, color = drug_colors["SC919"],
+           fontface = "bold", size = 4.2) +
+  scale_fill_manual(values = drug_colors) + scale_color_manual(values = drug_colors) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), expand = c(0, 0)) +
+  scale_x_discrete(expand = expansion(add = 0.5)) +
+  coord_cartesian(ylim = c(-0.30, 1.02), clip = "off") +
+  labs(x = "U-test versus Other / SLC34A2-low  (p-value)", y = "Sensitivity (AUC)") +
+  publication_theme +
+  theme(panel.grid.major.x = element_blank(), legend.position = "none",
+        axis.text.x = element_text(face = "bold", size = 9, lineheight = 0.95, margin = margin(t = 2)),
+        axis.title.x = element_text(size = 9, margin = margin(t = 34)),
+        plot.margin = margin(t = 22, r = 8, b = 4, l = 6))
+fig_2e
+save_fig(fig_2e, "fig2e_SLC34A2_stratified_violin.pdf", 5.2, 4.4)
+
+published_p <- tribble(
+  ~Drug,   ~Group,                      ~published, ~tol,
+  "RBD27", "Gyn.\nSLC34A2-high",         1.1e-5,    0.05e-5,
+  "RBD27", "Gyn.\nSLC34A2-low",          0.520,     0.001,
+  "RBD27", "Other\nSLC34A2-high",        0.003,     0.001,
+  "SC919", "Gyn.\nSLC34A2-high",         0.003,     0.001,
+  "SC919", "Gyn.\nSLC34A2-low",          0.721,     0.001,
+  "SC919", "Other\nSLC34A2-high",        0.016,     0.001)
+for (i in seq_len(nrow(published_p))) {
+  p <- slc_pvals %>% filter(Drug == published_p$Drug[i], Group == published_p$Group[i]) %>% pull(p)
+  add_check("Fig 2E", paste("U-test p,", published_p$Drug[i], str_replace(published_p$Group[i], "\n", " "), "vs reference"),
+            p, published_p$published[i], "Fig 2E panel", tol = published_p$tol[i])
+}
+```
+
+# Fig 2F: molecular correlates of sensitivity
+
+For every gene, the Pearson correlation between its profile across the PRISM cell lines and the
+AUC of each drug, for mRNA expression and for CRISPR gene effect (genes measured in at least 100
+of the cell lines). A positive correlation with expression means that higher expression goes with
+lower sensitivity (higher AUC); a positive correlation with Chronos means the same for dependency.
+
+```{r fig2f_data}
+auc_df <- prism_auc %>% select(ModelID, RBD27 = `RBD27:auc`, SC919 = `SC919:auc`)
+
+cor_vs_auc <- function(mat_df, label, auc_df, min_lines = 100) {
+  m <- mat_df[!duplicated(mat_df$ModelID), ]
+  j <- inner_join(auc_df, m, by = "ModelID")
+  mat <- as.matrix(j[, -(1:3)])
+  mat <- mat[, colSums(!is.na(mat)) >= min_lines, drop = FALSE]
+  tibble(gene = colnames(mat), feature_set = label, n_lines = unname(colSums(!is.na(mat))),
+         RBD27 = suppressWarnings(cor(mat, j$RBD27, use = "pairwise.complete.obs")[, 1]),
+         SC919 = suppressWarnings(cor(mat, j$SC919, use = "pairwise.complete.obs")[, 1]))
+}
+
+biomarker_denovo <- bind_rows(cor_vs_auc(expression, "mRNA exp.", auc_df),
+                              cor_vs_auc(crispr, "CRISPR dep.", auc_df)) %>% drop_na(RBD27, SC919)
+biomarker_denovo %>% count(feature_set)
+```
+
+## Check against the PRISM biomarker output
+
+The PRISM biomarker module, run at the Broad on the same DepMap release, returns the same
+correlations but only for the top-ranked features. Every gene it lists is compared with the
+recomputed value.
+
+```{r fig2f_check}
+supplied <- biomarkers %>%
+  filter(feature_set %in% c("Expression", "CRISPR")) %>%
+  mutate(feature_set = recode(feature_set, "Expression" = "mRNA exp.", "CRISPR" = "CRISPR dep.")) %>%
+  select(gene = feature, feature_set, treatment, supplied = correlation_coef, n_supplied = n) %>%
+  inner_join(biomarker_denovo %>% pivot_longer(c(RBD27, SC919), names_to = "treatment", values_to = "recomputed"),
+             by = c("gene", "feature_set", "treatment"))
+supplied %>% group_by(feature_set, treatment) %>%
+  summarise(genes = n(), max_abs_difference = max(abs(supplied - recomputed)), .groups = "drop")
+
+add_check("Fig 2F", "genes of the biomarker output (CRISPR and expression) found in the recomputed table", nrow(supplied),
+          nrow(biomarkers %>% filter(feature_set %in% c("Expression", "CRISPR"))), "PRISM biomarker output", exact = TRUE)
+add_check("Fig 2F", "recomputed vs biomarker output, max |difference in r|",
+          max(abs(supplied$supplied - supplied$recomputed)), 0, "PRISM biomarker output", tol = 1e-5)
+```
+
+```{r fig2f, fig.height=3.3, fig.width=3.3}
+paper_labels <- c("XPR1", "KIDINS220", "SYNJ2", "SOCS5", "PEAR1", "SLC20A1", "GNAT2", "SLC20A2", "USP53",
+                  "TAX1BP3", "DRAP1", "KLF10", "S100A1", "SLC34A2")
+f2f_lab <- biomarker_denovo %>% filter(gene %in% paper_labels)
+
+fig_2f <- ggplot(biomarker_denovo, aes(RBD27, SC919)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey55", linewidth = 0.3) +
+  geom_hline(yintercept = 0, color = "grey25", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "grey25", linewidth = 0.3) +
+  ggrastr::rasterise(geom_point(aes(color = feature_set), size = 0.35, alpha = 0.45, stroke = 0),
+                     dpi = 450, dev = "ragg") +
+  geom_point(data = f2f_lab, aes(color = feature_set), size = 1.1) +
+  geom_text_repel(data = f2f_lab, aes(label = gene, color = feature_set), size = 2.0, fontface = "bold",
+                  box.padding = 0.3, min.segment.length = 0, segment.color = "black", segment.size = 0.22,
+                  max.overlaps = Inf, show.legend = FALSE, seed = 1) +
+  scale_color_manual(values = c("CRISPR dep." = "#31a354", "mRNA exp." = "#756bb0"), name = "Molecular Feature") +
+  guides(color = guide_legend(override.aes = list(size = 1.5, alpha = 1))) +
+  coord_fixed() +
+  labs(x = "Pearson correlation, RBD27", y = "Pearson correlation, SC919") +
+  publication_theme +
+  theme(panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+        axis.text = element_text(size = 7), axis.title = element_text(size = 8.5),
+        legend.position = c(0.02, 0.98), legend.justification = c(0, 1),
+        legend.background = element_rect(fill = "white", color = "black", linewidth = 0.25),
+        legend.margin = margin(2, 4, 2, 2), legend.title = element_text(size = 6.5, face = "bold"),
+        legend.text = element_text(size = 6), legend.key.size = unit(0.32, "cm"),
+        axis.title.x = element_text(color = drug_colors["RBD27"], face = "bold"),
+        axis.title.y = element_text(color = drug_colors["SC919"], face = "bold"))
+fig_2f
+save_fig(fig_2f, "fig2f_biomarker_concordance.pdf", 3.3, 3.3)
+
+f2f_lab %>% arrange(feature_set, RBD27) %>% select(gene, feature_set, n_lines, RBD27, SC919) %>%
+  mutate(across(c(RBD27, SC919), ~ round(.x, 3)))
+```
+
+# ED Fig 3D: expression and sensitivity across the cell lines
+
+Cell lines are ordered by combined sensitivity (RBD27 AUC plus SC919 AUC, most sensitive first) and
+drawn on a log-rank axis so that the most sensitive lines take most of the width. The numbers at the
+right of each row are the Pearson correlations of that row with the RBD27 (orange) and SC919 (teal) AUC.
+
+```{r ed3d, fig.height=6.5, fig.width=6}
+target_genes <- c("XPR1", "SLC20A1", "SLC20A2", "SLC34A2", "SYNJ2", "PAX8")
+
+heatmap_source <- prism_auc %>%
+  inner_join(expression %>% select(ModelID, all_of(target_genes)), by = "ModelID") %>%
+  drop_na(`RBD27:auc`, `SC919:auc`, all_of(target_genes))
+
+cell_line_order <- heatmap_source %>% mutate(order = `RBD27:auc` + `SC919:auc`) %>% arrange(order) %>% pull(ModelID)
+n_lines <- length(cell_line_order)
+
+rank_df <- tibble(ModelID = factor(cell_line_order, levels = cell_line_order)) %>%
+  mutate(rank = as.integer(ModelID), width = log2(rank + 1) - log2(rank), x = (log2(rank) + log2(rank + 1)) / 2)
+logrank_breaks <- sort(unique(rank_df$x))
+logrank_labels <- c(1, rep("", 8), 10, rep("", 89), 100, rep("", n_lines - 101), n_lines)
+
+drug_long <- heatmap_source %>%
+  select(ModelID,
+         `RBD27 (220nM)` = `RBD27:220:nM`, `RBD27 (670nM)` = `RBD27:670:nM`, `RBD27 (2000nM)` = `RBD27:2000:nM`,
+         `RBD27 (AUC)` = `RBD27:auc`,
+         `SC919 (100nM)` = `SC919:100:nM`, `SC919 (300nM)` = `SC919:300:nM`, `SC919 (1000nM)` = `SC919:1000:nM`,
+         `SC919 (3000nM)` = `SC919:3000:nM`, `SC919 (AUC)` = `SC919:auc`) %>%
+  pivot_longer(-ModelID, names_to = "drug_dose", values_to = "value") %>%
+  mutate(ModelID = factor(ModelID, levels = cell_line_order)) %>% left_join(rank_df, by = "ModelID")
+
+expr_long <- heatmap_source %>% select(ModelID, all_of(target_genes)) %>%
+  pivot_longer(-ModelID, names_to = "label", values_to = "expression") %>%
+  mutate(ModelID = factor(ModelID, levels = cell_line_order),
+         label = factor(label, levels = c("PAX8", "SYNJ2", "SLC34A2", "SLC20A2", "SLC20A1", "XPR1"))) %>%
+  left_join(rank_df, by = "ModelID")
+
+# Pearson correlation of every row with the two AUCs
+row_cors <- heatmap_source %>%
+  select(all_of(target_genes), `RBD27 (AUC)` = `RBD27:auc`, `SC919 (AUC)` = `SC919:auc`,
+         `RBD27 (2000nM)` = `RBD27:2000:nM`, `RBD27 (670nM)` = `RBD27:670:nM`, `RBD27 (220nM)` = `RBD27:220:nM`,
+         `SC919 (3000nM)` = `SC919:3000:nM`, `SC919 (1000nM)` = `SC919:1000:nM`,
+         `SC919 (300nM)` = `SC919:300:nM`, `SC919 (100nM)` = `SC919:100:nM`) %>%
+  as.matrix() %>%
+  cor(., .[, c("RBD27 (AUC)", "SC919 (AUC)")], use = "pairwise.complete.obs") %>%
+  as.data.frame() %>% rownames_to_column("row") %>%
+  rename(RBD27 = `RBD27 (AUC)`, SC919 = `SC919 (AUC)`)
+
+logrank_x <- function() list(scale_x_continuous(expand = c(0, 0), breaks = logrank_breaks, labels = logrank_labels),
+                             scale_y_discrete(expand = c(0, 0)))
+cbar <- function(title) guides(fill = guide_colourbar(barwidth = 0.5, barheight = unit(1.5, "cm"),
+                                                      ticks.colour = "black", title = title, frame.colour = "black"))
+no_x <- theme(axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank())
+x_end <- log2(n_lines + 1)
+cor_labels <- function(rows) {
+  row_cors %>% filter(row %in% rows) %>%
+    pivot_longer(c(RBD27, SC919), names_to = "Drug", values_to = "r") %>%
+    mutate(x = x_end + if_else(Drug == "RBD27", 0.35, 1.45), label = sprintf("%.3f", r))
+}
+cor_text <- function(rows) list(
+  geom_text(data = cor_labels(rows), aes(x = x, y = row, label = label, color = Drug), inherit.aes = FALSE,
+            size = 2.6, hjust = 0), scale_color_manual(values = drug_colors, guide = "none"),
+  coord_cartesian(clip = "off"))
+# room between the heatmap and its colour bar for the correlation numbers
+side_margin <- theme(plot.margin = margin(2, 4, 2, 5), legend.box.spacing = unit(52, "pt"))
+
+p_expr <- ggplot(expr_long, aes(x, label, fill = expression, width = width)) + geom_tile() +
+  scale_fill_gradient(low = "white", high = "#006d2c") + logrank_x() + cbar("Log2(TPM+1)") +
+  cor_text(levels(expr_long$label)) + labs(x = "", y = "mRNA Exp.") + publication_theme + no_x + side_margin +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5))
+
+auc_rows <- c("RBD27 (AUC)", "SC919 (AUC)")
+p_auc <- drug_long %>% filter(str_detect(drug_dose, "AUC")) %>%
+  mutate(drug_dose = factor(drug_dose, auc_rows)) %>%
+  ggplot(aes(x, drug_dose, fill = value, width = width)) + geom_tile() +
+  scale_fill_gradient(low = "#2166ac", high = "#f7f7f7", limits = c(0, 1)) + logrank_x() + cbar("AUC") +
+  coord_cartesian(clip = "off") + labs(x = "", y = "") + publication_theme + no_x + side_margin
+
+dose_rows <- c("RBD27 (220nM)", "RBD27 (670nM)", "RBD27 (2000nM)", "SC919 (100nM)", "SC919 (300nM)",
+               "SC919 (1000nM)", "SC919 (3000nM)")
+p_dose <- drug_long %>% filter(!str_detect(drug_dose, "AUC")) %>%
+  mutate(drug_dose = factor(drug_dose, dose_rows)) %>%
+  ggplot(aes(x, drug_dose, fill = value, width = width)) + geom_tile() +
+  scale_fill_gradient2(low = "#2166ac", mid = "#f7f7f7", high = "#b2182b", midpoint = 0) + logrank_x() + cbar("Log2FC") +
+  cor_text(dose_rows) + labs(x = "Cancer cell lines (Log Rank)", y = "Drug & Dose") + publication_theme + side_margin
+
+fig_3d <- p_expr / p_auc / p_dose + plot_layout(heights = c(0.85, 0.3, 1))
+fig_3d
+save_fig(fig_3d, "ed3d_expression_vs_sensitivity_logrank.pdf", 6, 6.5)
+
+row_cors %>% mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+published_cors <- tribble(
+  ~row,              ~RBD27,   ~SC919,
+  "XPR1",            -0.05,    -0.057,
+  "SLC20A1",          0.042,    0.012,
+  "SLC20A2",         -0.102,   -0.134,
+  "SLC34A2",         -0.343,   -0.233,
+  "SYNJ2",            0.189,    0.183,
+  "PAX8",            -0.137,   -0.043,
+  "SC919 (3000nM)",   0.75,     0.808,
+  "SC919 (1000nM)",   0.72,     0.825,
+  "SC919 (300nM)",    0.631,    0.826,
+  "SC919 (100nM)",    0.367,    0.598,
+  "RBD27 (2000nM)",   0.86,     0.749,
+  "RBD27 (670nM)",    0.879,    0.731,
+  "RBD27 (220nM)",    0.842,    0.702)
+for (i in seq_len(nrow(published_cors))) for (d in c("RBD27", "SC919")) {
+  add_check("ED Fig 3D", paste("Pearson r,", published_cors$row[i], "with", d, "AUC"),
+            row_cors[[d]][row_cors$row == published_cors$row[i]], published_cors[[d]][i], "ED Fig 3D panel", tol = 0.0011)
+}
+add_check("ED Fig 3D", "cell lines in the heatmap", n_lines, 472, "ED Fig 3D axis", exact = TRUE)
+```
+
+# ED Fig 3B and 3E: gene dependency
+
+```{r ed3b, fig.height=4, fig.width=6}
+chronos_long <- crispr_pathway %>%
+  pivot_longer(-ModelID, names_to = "Gene", values_to = "Chronos_Score") %>% drop_na() %>%
+  mutate(Gene = factor(Gene, levels = phosphate_genes))
+lines_per_gene <- chronos_long %>% count(Gene, name = "n_cell_lines")
+lines_per_gene
+
+fig_3b <- ggplot(chronos_long, aes(Gene, Chronos_Score)) +
+  geom_jitter(width = 0.2, alpha = 0.3, color = "grey40", size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "#b2182b", linewidth = 0.8) +
+  labs(x = NULL, y = "CRISPR dependency (Chronos score)") + publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "bold", size = 11),
+        panel.grid.major.x = element_blank())
+fig_3b
+save_fig(fig_3b, "ed3b_pathway_gene_Chronos_distributions.pdf", 6, 4)
+
+add_check("ED Fig 3B", "cell lines for most genes", max(lines_per_gene$n_cell_lines), 1186, "ED Fig 3B legend", exact = TRUE)
+add_check("ED Fig 3B", "cell lines for NUDT4", lines_per_gene$n_cell_lines[lines_per_gene$Gene == "NUDT4"], 45,
+          "ED Fig 3B legend", exact = TRUE)
+```
+
+The correlations of ED Fig 3E use the PRISM cell lines that have CRISPR data (400). Below the
+triangle, the median and variance of each profile are shown with a common direction: a larger
+value always means more killing (AUC is inverted as 1 - AUC, Chronos is negated).
+
+```{r ed3e, fig.height=5, fig.width=5}
+ordered_features <- c(phosphate_genes, "RBD27 (AUC)", "SC919 (AUC)")
+
+cor_matrix_data <- prism_auc %>% select(ModelID, `RBD27 (AUC)` = `RBD27:auc`, `SC919 (AUC)` = `SC919:auc`) %>%
+  inner_join(crispr_pathway, by = "ModelID") %>%
+  semi_join(crispr, by = "ModelID") %>%
+  select(all_of(ordered_features))
+add_check("ED Fig 3E", "PRISM cell lines with CRISPR data", nrow(cor_matrix_data), 400, "DepMap 25Q3", exact = TRUE)
+
+crispr_cor <- cor(cor_matrix_data, use = "pairwise.complete.obs", method = "pearson")
+crispr_cor[upper.tri(crispr_cor, diag = TRUE)] <- NA
+
+cor_df <- crispr_cor %>% as.data.frame() %>% rownames_to_column("Feature_Y") %>%
+  pivot_longer(-Feature_Y, names_to = "Feature_X", values_to = "Pearson_R") %>% drop_na(Pearson_R) %>%
+  mutate(Feature_X = factor(Feature_X, levels = ordered_features), Feature_Y = factor(Feature_Y, levels = rev(ordered_features)))
+
+p_tri <- ggplot(cor_df, aes(Feature_X, Feature_Y, fill = Pearson_R)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_gradient2(low = "#2166ac", mid = "#f7f7f7", high = "#b2182b", midpoint = 0, limits = c(-1, 1), name = "Pearson R",
+                       guide = guide_colorbar(barheight = 8, barwidth = 1, frame.colour = "black", ticks.colour = "black")) +
+  scale_x_discrete(drop = FALSE) + labs(x = NULL, y = NULL) + publication_theme +
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(face = "bold", size = 11), panel.grid = element_blank(),
+        axis.ticks = element_blank(), plot.margin = margin(b = 0, unit = "pt"))
+
+anno_df <- cor_matrix_data %>% pivot_longer(everything(), names_to = "Feature_X", values_to = "Raw_Value") %>% drop_na() %>%
+  mutate(Effect_Score = if_else(str_detect(Feature_X, "AUC"), 1 - Raw_Value, -Raw_Value)) %>%
+  group_by(Feature_X) %>% summarise(Median = median(Effect_Score), Variance = var(Effect_Score), .groups = "drop") %>%
+  pivot_longer(-Feature_X, names_to = "Metric", values_to = "Score") %>%
+  mutate(Feature_X = factor(Feature_X, levels = ordered_features), Metric = factor(Metric, levels = c("Median", "Variance")))
+
+p_anno <- ggplot(anno_df, aes(Feature_X, Metric, fill = Score)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_gradient(low = "#f7fcf5", high = "#00441b", name = "Metric",
+                      guide = guide_colorbar(barheight = 3, barwidth = 1, frame.colour = "black", ticks.colour = "black")) +
+  scale_x_discrete(drop = FALSE) + labs(x = NULL, y = NULL) + publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "bold", size = 11),
+        axis.text.y = element_text(face = "bold", size = 11), panel.grid = element_blank(), axis.ticks = element_blank(),
+        plot.margin = margin(t = 0, unit = "pt"))
+
+fig_3e <- p_tri / p_anno + plot_layout(heights = c(1, 0.4))
+fig_3e
+save_fig(fig_3e, "ed3e_dependency_vs_sensitivity.pdf", 5, 5)
+
+cor_df %>% filter(Feature_X == "XPR1", Feature_Y == "KIDINS220") %>% select(Feature_X, Feature_Y, Pearson_R)
+```
+
+# ED Fig 3F: correlation with other PRISM compounds
+
+The correlation of RBD27 and SC919 AUC with the AUC of the compounds of the public PRISM drug
+repurposing screen, from the PRISM biomarker output (the repurposing data are not part of this
+dataset). Each point is a compound measured in at least 430 of the cell lines; the five compounds
+with the highest and the five with the lowest mean correlation are labelled.
+
+```{r ed3f, fig.height=3.6, fig.width=3.6}
+repurposing <- biomarkers %>%
+  filter(feature_set == "Repurposing.Primary", dose_unit == "auc") %>%
+  select(feature, treatment, correlation_coef) %>%
+  pivot_wider(names_from = treatment, values_from = correlation_coef, names_prefix = "r_") %>%
+  drop_na(r_RBD27, r_SC919) %>% mutate(avg_cor = (r_RBD27 + r_SC919) / 2)
+
+repurposing_labels <- bind_rows(slice_max(repurposing, avg_cor, n = 5, with_ties = FALSE),
+                                slice_min(repurposing, avg_cor, n = 5, with_ties = FALSE))
+max_abs_r <- max(abs(c(repurposing$r_RBD27, repurposing$r_SC919)))
+
+fig_3f <- ggplot(repurposing, aes(r_RBD27, r_SC919)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.3) + geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_point(alpha = 0.4, size = 1.5, color = "#32a354") +
+  geom_point(data = repurposing_labels, size = 2, color = "#32a354") +
+  geom_text_repel(data = repurposing_labels, aes(label = feature), size = 2.5, color = "grey40", max.overlaps = Inf,
+                  box.padding = 0.9, point.padding = 0.3, min.segment.length = 0, segment.color = "black",
+                  segment.size = 0.3, seed = 3) +
+  coord_fixed() + publication_theme +
+  # The panel shows how weakly the other compounds correlate with either drug (all |r| < 0.3), in
+  # contrast to the correlation of 0.81 between RBD27 and SC919 themselves (Fig 2D).
+  labs(title = sprintf("RBD27:SC919 correlation = %.2f", r_2d),
+       subtitle = sprintf("Each point is one of %d other compounds (all |r| < 0.3)", nrow(repurposing)),
+       x = "RBD27 correlation (Pearson r)", y = "SC919 correlation (Pearson r)") +
+  theme(plot.title = element_text(size = 9, face = "bold.italic"), plot.subtitle = element_text(size = 8))
+fig_3f
+save_fig(fig_3f, "ed3f_PRISM_drug_drug_correlation.pdf", 3.6, 3.6)
+
+published_labels <- c("DEPRODONE PROPIONATE", "CEP-32496", "PD-407824", "AZ20", "PENFLURIDOL",
+                      "EDITOL", "SNDX-5613", "OCLACITINIB", "IPI549", "SAR125844")
+add_check("ED Fig 3F", "the ten labelled compounds are the top five and bottom five",
+          paste(sort(repurposing_labels$feature), collapse = "; "), paste(sort(published_labels), collapse = "; "),
+          "ED Fig 3F panel", exact = TRUE)
+add_check("ED Fig 3F", "compounds plotted", nrow(repurposing), 284, "PRISM biomarker output", exact = TRUE)
+add_check("ED Fig 3F", "title: correlation of RBD27 and SC919 AUC", r_2d, 0.81, "ED Fig 3F panel title (= Fig 2D)", tol = 0.005)
+add_check("ED Fig 3F", "largest |correlation| of another compound with either drug is below 0.3",
+          max_abs_r < 0.3, TRUE, "ED Fig 3F panel", exact = TRUE)
+```
+
+# Source data workbook
+
+```{r workbook}
+sheet_guide <- tribble(
+  ~sheet, ~contents,
+  "Sensitivity_by_cell_line", "475 cell lines: lineage, fold change at each dose and AUC for RBD27 and SC919",
+  "Fig2D_E_cell_lines", "472 cell lines with SLC34A2 expression, group, and AUC (Fig 2D, 2E)",
+  "Fig2E_stats", "Group sizes, medians and Mann-Whitney U p-values against Other / SLC34A2-low",
+  "Fig2F_correlations", "Pearson correlation of every gene's expression and Chronos score with RBD27 and SC919 AUC",
+  "Fig2F_vs_biomarker_output", "Recomputed correlations next to the PRISM biomarker output",
+  "ED3B_Chronos", "Chronos score of the pathway genes in every DepMap model",
+  "ED3C_recovery", "Cell lines detected, low and missing in each PCR well",
+  "ED3D_correlations", "Pearson correlation of each heatmap row with the AUC of each drug",
+  "ED3E_correlations", "Pearson correlation matrix and median / variance track",
+  "ED3F_repurposing", "Correlation of both drugs with each repurposing compound",
+  "Sushi_l2fc_check", "Fold changes recomputed from normalized counts next to Sushi's",
+  "checks_vs_paper", "Every recomputed number next to its published value")
+
+checks_tbl <- bind_rows(checks)
+write_xlsx(
+  list(
+    README = sheet_guide,
+    Sensitivity_by_cell_line = prism_auc,
+    Fig2D_E_cell_lines = slc_df %>% select(ModelID, CCLE_name, lineage, disease, SLC34A2_expression = SLC34A2,
+                                           lineage_group = lin, SLC34A2_group = slc, `RBD27:auc`, `SC919:auc`),
+    Fig2E_stats = slc_summary,
+    Fig2F_correlations = biomarker_denovo,
+    Fig2F_vs_biomarker_output = supplied,
+    ED3B_Chronos = chronos_long,
+    ED3C_recovery = recovery,
+    ED3D_correlations = row_cors,
+    ED3E_correlations = crispr_cor %>% as.data.frame() %>% rownames_to_column("feature"),
+    ED3F_repurposing = repurposing,
+    Sushi_l2fc_check = l2fc_compare,
+    checks_vs_paper = checks_tbl),
+  here("results", "Figure2_source_data.xlsx"))
+write_csv(checks_tbl, here("results", "checks_vs_paper.csv"))
+knitr::kable(checks_tbl)
+```
+
+```{r session}
+sessionInfo()
+```

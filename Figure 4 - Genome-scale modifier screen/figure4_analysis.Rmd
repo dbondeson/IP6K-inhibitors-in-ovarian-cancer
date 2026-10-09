@@ -1,0 +1,329 @@
+---
+title: "Figure 4A and Extended Data Figure 5B: genome-scale modifier screens of XPR1 and IP6K inhibition"
+author: "Daniel Bondeson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+---
+
+This document regenerates the genome-scale modifier screen panels (Figure 4A and Extended
+Data Figure 5B) from the Figshare dataset, writes a source-data workbook, and prints each
+recomputed number next to the value in the paper. See `README.md`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = FALSE,
+                      fig.path = file.path(tempdir(), "fig4-"))   # keep knit chunk images out of the repo
+```
+
+# Setup
+
+```{r packages}
+library(tidyverse)
+library(here)
+library(scales)
+library(ggrepel)
+library(scattermore)
+library(reshape2)    # melt() for the correlation heatmap
+library(janitor)
+library(writexl)
+
+dir.create(here("results"), showWarnings = FALSE)
+
+# Input files come from the Figshare dataset (see data/README.md). They are read from
+# data/ unless FIG4_DATA_DIR points elsewhere.
+data_dir <- Sys.getenv("FIG4_DATA_DIR", unset = here("data"))
+data_path <- function(x) file.path(data_dir, x)
+
+publication_theme <- theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title   = element_text(face = "bold", size = 12),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9),
+    strip.text   = element_text(face = "bold", size = 10),
+    legend.title = element_text(face = "bold", size = 9),
+    legend.text  = element_text(size = 8)
+  )
+
+drug_colors <- c("RBD27" = "#d94801", "SC919" = "darkcyan")
+
+save_fig <- function(plot, file, width, height) {
+  ggsave(here("results", file), plot = plot, width = width, height = height, units = "in")
+  invisible(plot)
+}
+
+# Comparison table: every recomputed number next to its published value
+checks <- list()
+add_check <- function(panel, quantity, recomputed, expected, source, tol = NA, exact = FALSE) {
+  ok <- if (exact) identical(as.character(recomputed), as.character(expected))
+        else if (is.na(tol)) isTRUE(all.equal(recomputed, expected, tolerance = 1e-3))
+        else abs(recomputed - expected) <= tol
+  checks[[length(checks) + 1]] <<- tibble(
+    panel = panel, quantity = quantity,
+    recomputed = as.character(if (is.numeric(recomputed)) signif(recomputed, 5) else recomputed), expected = as.character(expected),
+    source = source, match = ok)
+}
+
+is_control_gene <- function(g) str_detect(g, "^(NO_SITE|ONE_INTERGENIC_SITE)")
+```
+
+# Modifier screens (Fig 4A, ED Fig 5B)
+
+Humagne enCas12a screens in RMGI cells, two library sets (C and D), 14 days of treatment
+with vehicle, 200 nM RBD27 or 350 nM SC919. The input is one table of summed read counts
+per set (constructs x samples); see the Figshare README for how each column was assembled.
+
+```{r screen_data}
+count_tables <- list(
+  C = read_csv(data_path("RMGI_Humagne_SetC_summed_read_counts.csv"), show_col_types = FALSE),
+  D = read_csv(data_path("RMGI_Humagne_SetD_summed_read_counts.csv"), show_col_types = FALSE)
+)
+sample_key <- read_csv(data_path("RMGI_Humagne_sample_key.csv"), show_col_types = FALSE)
+
+# Library design: every construct scored by the portal and the gene it targets
+chip <- read_csv(data_path("Humagne_construct_to_gene_map.csv"), show_col_types = FALSE)
+
+rmgi_chronos <- read_csv(data_path("DepMap_25Q3_RMGI_CRISPR_gene_effect.csv"),
+                         show_col_types = FALSE) %>%
+  select(gene, chronos = chronos_gene_effect)
+
+sapply(count_tables, function(t) c(constructs = nrow(t), samples = ncol(t) - 4))
+```
+
+## Construct-level log2 fold change against DMSO
+
+Reads are converted to log2 reads per million within each sample (pseudocount 1, total over
+every construct of the sample), replicates are collapsed by their median, and the fold
+change is the drug minus the DMSO value, separately in each library set. No construct is
+filtered out here: the scoring below ranks all 40,376 constructs of the library together.
+
+```{r construct_lfc}
+log2rpm <- function(x) log2(x / sum(x, na.rm = TRUE) * 1e6 + 1)
+
+construct_lfc <- function(tab) {
+  samples <- setdiff(names(tab), c("guide_id", "gene", "construct_sequence", "construct_ids"))
+  rpm <- tab %>% mutate(across(all_of(samples), log2rpm))
+  condition_median <- function(prefix) {
+    cols <- grep(paste0("^", prefix, "_"), samples, value = TRUE)
+    apply(as.matrix(rpm[cols]), 1, median, na.rm = TRUE)
+  }
+  tibble(guide_id = tab$guide_id, construct_sequence = tab$construct_sequence,
+         DMSO = condition_median("DMSO"), RBD27 = condition_median("RBD27"),
+         SC919 = condition_median("SC919")) %>%
+    mutate(RBD27_vs_DMSO = RBD27 - DMSO, SC919_vs_DMSO = SC919 - DMSO)
+}
+
+# The two sets share no construct sequence. The tables also hold 334 constructs (200 in set C,
+# 134 in set D, mostly with very few reads) that are not in the library design file; like the
+# portal run, the scoring is restricted to the 40,376 constructs of the design file.
+construct_scores <- bind_rows(C = construct_lfc(count_tables$C),
+                              D = construct_lfc(count_tables$D), .id = "humagne_set") %>%
+  distinct(construct_sequence, .keep_all = TRUE)
+
+lfc <- chip %>% left_join(construct_scores, by = "construct_sequence")
+stopifnot(nrow(lfc) == 40376, !anyNA(lfc$RBD27_vs_DMSO), !anyNA(lfc$SC919_vs_DMSO))
+```
+
+## Gene scores by the hypergeometric method
+
+The gene scores come from the Broad GPP portal's hypergeometric analysis. It is
+reimplemented here and checked against the portal's own output files. All constructs are
+ranked by fold change. For a gene with n constructs, its k-th best construct at rank r gets
+p = P(exactly k of the gene's n constructs fall among the r lowest-ranked constructs), the
+hypergeometric probability with N = 40,376. This is done once from the depleted end and once
+from the enriched end. The gene score is the larger of the two mean -log10(p), and the
+gene's average LFC is the mean of its construct LFCs.
+
+```{r gpp_scoring}
+hypergeometric_gene_scores <- function(lfc_values, genes) {
+  d <- tibble(gene = genes, lfc = lfc_values)
+  N <- nrow(d)
+  d <- d %>%
+    mutate(asc = rank(lfc, ties.method = "min"), desc = N + 1 - asc) %>%
+    group_by(gene) %>%
+    mutate(n = n(),
+           k_asc  = rank(asc,  ties.method = "first"),
+           k_desc = rank(desc, ties.method = "first")) %>%
+    ungroup() %>%
+    mutate(nlp_depleted = -log10(dhyper(k_asc,  asc,  N - asc,  n)),
+           nlp_enriched = -log10(dhyper(k_desc, desc, N - desc, n)))
+  d %>%
+    group_by(gene) %>%
+    summarise(n_constructs = first(n), avg_lfc = mean(lfc),
+              mean_nlp_depleted = mean(nlp_depleted), mean_nlp_enriched = mean(nlp_enriched),
+              .groups = "drop") %>%
+    mutate(avg_neglog10_p = pmax(mean_nlp_depleted, mean_nlp_enriched),
+           direction = if_else(mean_nlp_depleted >= mean_nlp_enriched, "depleted", "enriched"))
+}
+
+gene_scores <- map(c(RBD27 = "RBD27_vs_DMSO", SC919 = "SC919_vs_DMSO"),
+                   ~ hypergeometric_gene_scores(lfc[[.x]], lfc$gene))
+
+# Compare with the portal output for every gene that has the same constructs in both
+read_portal <- function(drug) {
+  read_tsv(data_path(sprintf("GPP_portal_hypergeometric_%s_vs_DMSO.txt", drug)),
+           show_col_types = FALSE) %>%
+    clean_names() %>%
+    select(gene = gene_symbol, portal_lfc = average_lfc,
+           portal_nlp = average_log_p_values, portal_n = number_of_perturbations)
+}
+portal <- map(c(RBD27 = "RBD27", SC919 = "SC919"), read_portal)
+
+portal_check <- imap_dfr(gene_scores, function(s, drug) {
+  j <- inner_join(portal[[drug]], s, by = "gene") %>%
+    filter(portal_n == n_constructs, !is_control_gene(gene))
+  tibble(drug = drug, genes_compared = nrow(j),
+         max_diff_average_LFC = max(abs(j$portal_lfc - j$avg_lfc)),
+         max_diff_neglog10_p  = max(abs(j$portal_nlp - j$avg_neglog10_p)))
+})
+portal_check
+for (i in seq_len(nrow(portal_check))) {
+  add_check("Fig 4A", paste(portal_check$drug[i], "average LFC vs GPP portal, max difference over",
+                            portal_check$genes_compared[i], "genes"),
+            portal_check$max_diff_average_LFC[i], 0, "GPP portal output", tol = 1e-6)
+  add_check("Fig 4A", paste(portal_check$drug[i], "average -log10 p vs GPP portal, max difference"),
+            portal_check$max_diff_neglog10_p[i], 0, "GPP portal output", tol = 1e-6)
+}
+```
+
+The portal also scores 599 control pseudo-genes (`NO_SITE_n`, `ONE_INTERGENIC_SITE_n`) by
+pairing control constructs two at a time; the pairing in the library design file differs
+from the portal run, so those entries are not reproduced and are left out of the figure.
+
+## Fig 4A: RBD27 against SC919
+
+```{r fig4a, fig.height=3, fig.width=4}
+modifier <- gene_scores$RBD27 %>%
+  select(gene, rbd_lfc = avg_lfc, rbd_p = avg_neglog10_p) %>%
+  full_join(gene_scores$SC919 %>% select(gene, sc919_lfc = avg_lfc, sc919_p = avg_neglog10_p),
+            by = "gene") %>%
+  left_join(rmgi_chronos, by = "gene") %>%
+  filter(!is_control_gene(gene))
+
+highlight_genes <- c("NUDT4", "NUDT3", "SLC34A2", "PAX8", "KIDINS220", "SLC20A1", "SLC20A2",
+                     "XPR1", "IP6K1", "IP6K2", "PPIP5K1", "PPIP5K2")
+
+plot_df <- modifier %>% mutate(lfc_magnitude = sqrt(rbd_lfc^2 + sc919_lfc^2)) %>% arrange(lfc_magnitude)
+hl <- plot_df %>% filter(gene %in% highlight_genes)
+
+fig4a <- ggplot(plot_df, aes(rbd_lfc, sc919_lfc)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_scattermore(aes(color = chronos, alpha = lfc_magnitude),
+                   pointsize = 10, pixels = c(1024, 1024)) +
+  geom_point(data = hl, aes(fill = chronos), shape = 21, color = "black",
+             size = 3.5, stroke = 1) +
+  geom_text_repel(data = hl, aes(label = gene), size = 3.5, fontface = "bold.italic",
+                  box.padding = 0.6, point.padding = 0.3, min.segment.length = 0, seed = 42,
+                  max.overlaps = Inf) +
+  scale_color_gradient(high = "grey80", low = "firebrick", limits = c(-1, 0),
+                       oob = squish, name = "RMGI\nDependency") +
+  scale_fill_gradient(high = "grey80", low = "firebrick", limits = c(-1, 0),
+                      oob = squish, guide = "none") +
+  scale_alpha_continuous(guide = "none") +
+  coord_fixed() +
+  labs(x = "RBD27 average LFC", y = "SC919 average LFC") +
+  publication_theme
+fig4a
+save_fig(fig4a, "fig4a_modifier_screen_RBD27_vs_SC919.pdf", 4, 3)
+
+pearson <- function(a, b) cor(a, b, use = "pairwise.complete.obs")
+add_check("Fig 4A", "Pearson r, RMGI Chronos vs RBD27 average LFC",
+          pearson(modifier$chronos, modifier$rbd_lfc), -0.100, "Fig 4A panel", tol = 0.001)
+add_check("Fig 4A", "Pearson r, RMGI Chronos vs SC919 average LFC",
+          pearson(modifier$chronos, modifier$sc919_lfc), -0.037, "Fig 4A panel", tol = 0.001)
+add_check("Fig 4A", "Pearson r, RBD27 vs SC919 average LFC",
+          pearson(modifier$rbd_lfc, modifier$sc919_lfc), 0.295, "Fig 4A panel", tol = 0.001)
+```
+
+## ED Fig 5B: concordance of the screen samples
+
+Per set, arrays with fewer than 5 reads in the Presort sample are dropped, reads are
+normalized within each sample over the remaining arrays, and each gene's log2 RPM is the
+median over its arrays. The panel correlates each sample's gene-level log2 fold change
+against Presort with the others and with the RMGI gene dependency.
+
+```{r ed5b, fig.height=4.5, fig.width=4.5}
+MIN_EARLY_READS <- 5
+
+gene_l2fc_vs_presort <- imap_dfr(count_tables, function(tab, set_name) {
+  keep <- tab %>% filter(!is.na(Presort), Presort >= MIN_EARLY_READS,
+                         !is_control_gene(gene))
+  samples <- setdiff(names(keep), c("guide_id", "gene", "construct_sequence", "construct_ids"))
+  keep %>%
+    mutate(across(all_of(samples), log2rpm)) %>%
+    pivot_longer(all_of(samples), names_to = "sample", values_to = "log2rpm") %>%
+    group_by(gene, sample) %>%
+    summarise(log2rpm = median(log2rpm, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = sample, values_from = log2rpm) %>%
+    mutate(across(-c(gene, Presort), ~ .x - Presort)) %>%
+    select(-Presort) %>%
+    rename_with(~ paste(set_name, .x, sep = "_"), -gene)
+})
+# one row per gene and set: combine the two sets side by side
+gene_l2fc_wide <- gene_l2fc_vs_presort %>%
+  pivot_longer(-gene, names_to = "sample_id", values_to = "L2FC", values_drop_na = TRUE) %>%
+  pivot_wider(names_from = sample_id, values_from = L2FC, values_fn = median) %>%
+  left_join(rmgi_chronos %>% rename(RMGI_Chronos = chronos), by = "gene")
+
+sample_levels <- c(sort(grep("^C_", names(gene_l2fc_wide), value = TRUE)),
+                   sort(grep("^D_", names(gene_l2fc_wide), value = TRUE)), "RMGI_Chronos")
+cor_screen <- cor(gene_l2fc_wide[sample_levels], use = "pairwise.complete.obs")
+cor_screen[upper.tri(cor_screen)] <- NA
+
+ed5b <- melt(cor_screen, na.rm = TRUE) %>%
+  mutate(Var1 = factor(Var1, levels = rev(sample_levels)), Var2 = factor(Var2, levels = sample_levels)) %>%
+  ggplot(aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 2.4) +
+  scale_fill_gradient2(low = "#084594", mid = "white", high = "#d94801", midpoint = 0,
+                       limits = c(-1, 1), name = "Pearson\nCorrelation") +
+  publication_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), axis.title = element_blank(),
+        panel.border = element_blank(), panel.background = element_blank(), aspect.ratio = 1) +
+  labs(title = "Screen L2FC and gene dependency")
+ed5b
+save_fig(ed5b, "ed5b_screen_sample_concordance.pdf", 4.5, 4.5)
+```
+
+
+# Source data workbook
+
+```{r workbook}
+sheet_guide <- tribble(
+  ~sheet, ~contents,
+  "Counts_SetC, Counts_SetD", "Summed read counts, constructs x samples (the input of the screen analysis)",
+  "Sample_key", "How each count column was assembled: source, wells, total reads",
+  "Fig4A_genes", "Gene-level average LFC and -log10 p for RBD27 and SC919, RMGI Chronos",
+  "Fig4A_constructs", "Construct-level LFC against DMSO for all 40,376 constructs",
+  "Fig4A_portal_check", "Recomputed scores against the GPP portal output",
+  "ED5B_data, ED5B_correlation", "Gene-level L2FC against Presort per sample; Pearson correlations",
+  "checks_vs_paper", "Every recomputed number next to its published value")
+
+checks_tbl <- bind_rows(checks)
+write_xlsx(
+  list(
+    README = sheet_guide,
+    Counts_SetC = count_tables$C, Counts_SetD = count_tables$D, Sample_key = sample_key,
+    Fig4A_genes = modifier %>% arrange(desc(pmax(rbd_p, sc919_p, na.rm = TRUE))),
+    Fig4A_constructs = lfc %>% select(construct_sequence, gene, humagne_set, guide_id,
+                                      DMSO_log2rpm = DMSO, RBD27_log2rpm = RBD27, SC919_log2rpm = SC919,
+                                      RBD27_vs_DMSO, SC919_vs_DMSO),
+    Fig4A_portal_check = portal_check,
+    ED5B_data = gene_l2fc_wide,
+    ED5B_correlation = as.data.frame(cor_screen) %>% rownames_to_column("sample"),
+    checks_vs_paper = checks_tbl
+  ),
+  here("results", "Figure4_modifier_screen_source_data.xlsx")
+)
+write_csv(checks_tbl, here("results", "checks_vs_paper.csv"))
+knitr::kable(checks_tbl)
+```
+
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,733 @@
+---
+title: "XPR1:KIDINS220 base editor screen: Figure 1A-B and Extended Data Figure 1A-E"
+author: "Daniel Bondeson"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+---
+
+This document takes the raw PoolQ read counts of the OVISE A>G / C>T base editor
+screen and produces every screen-derived panel of Figure 1 (1A, 1B) and Extended
+Data Figure 1 (A-E), plus a source-data workbook. See `README.md`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = FALSE)
+```
+
+# Setup
+
+```{r packages}
+library(tidyverse)
+library(reshape2)   # melt() for the replicate-correlation heatmap
+library(scales)     # comma()
+library(ggrepel)
+library(writexl)
+library(here)
+
+dir.create(here("results"), showWarnings = FALSE)
+```
+
+## Shared aesthetics
+
+```{r aesthetics}
+publication_theme <- theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    plot.title        = element_text(face = "bold", size = 12),
+    axis.title        = element_text(size = 10),
+    axis.text         = element_text(size = 9),
+    strip.text        = element_text(face = "bold", size = 10),
+    legend.title      = element_text(face = "bold", size = 9),
+    legend.text       = element_text(size = 8)
+  )
+
+# Domain color palettes
+domain_colors <- c(
+  "Ank" = "#084594", "TM" = "#4292c6", "Disordered" = "#9ecae1",
+  "SPX" = "#d94801", "Core" = "#fdae6b", "EXS" = "#f16913"
+)
+domain_colors_ext <- c(domain_colors, "Control" = "grey50")
+
+annotation_colors <- c(
+  "Negative Control" = "grey70",
+  "Positive Control" = "#1b9e77",
+  "XPR1"            = "#f16913",
+  "KIDINS220"       = "#4292c6"
+)
+
+mutation_class_shapes <- c(
+  "Missense"     = 18,
+  "Nonsense"     = 15,
+  "Silent"       = 16,
+  "Splice"       = 17,
+  "Control"      = 1,
+  "Other"        = 4
+)
+
+# Reusable helper to standardize mutation class labels
+clean_class <- function(x) {
+  case_when(
+    x %in% c("Silent", "Intron", "No edit") ~ "Silent",
+    x == "Missense"                          ~ "Missense",
+    x %in% c("Splice-donor", "Splice-acceptor") ~ "Splice",
+    x == "Nonsense"                          ~ "Nonsense",
+    TRUE                                     ~ "Other"
+  )
+}
+
+# jitter position shared across several plots
+pos_jitter <- position_jitter(width = 0.2, seed = 42)
+```
+
+# Screen data
+
+## Raw counts to log2 RPM
+
+PoolQ (v3.3.4, Broad GPP) wrote one raw count matrix per plate: 4,039
+constructs x samples, PCR replicates already summed. Plate 2 (pRDA_479) is the
+**A>G editor, ABE8e**; plate 1 (pRDA_478) is the **C>T editor, BE3.9**. Run
+settings are in `data/poolq_outputs/runinfo-*.txt`.
+
+Counts are converted to log2 reads-per-million with a pseudocount of 1, the same
+convention PoolQ uses for its own `lognorm-*` file. The chunk checks that the two
+agree, so the starting point of every figure is the raw count matrix.
+
+```{r screen_data}
+# Input files come from the Figshare dataset "Base editor screen of XPR1 and KIDINS220"
+# (see data/README.md). They are read from data/ unless FIG1_DATA_DIR points elsewhere.
+data_dir <- Sys.getenv("FIG1_DATA_DIR", unset = here("data"))
+
+gene_annotations <- read_csv(file.path(data_dir, "base_editor_library_gene_annotations.csv"))
+
+sgRNA_targets_full <- read_csv(file.path(data_dir, "base_editor_library_sgRNA_design_GPP.csv")) %>%
+  select(
+    strand      = `sgRNA Orientation`,
+    gene        = `Target Gene Symbol`,
+    sgRNA_pos_nt = `sgRNA Target Sequence Start Pos. (global)`,
+    sequence    = `sgRNA Target Sequence`,
+    CT_edit     = `Amino Acid Edits(C>T)`,
+    AG_edit     = `Amino Acid Edits(A>G)`,
+    CT_class    = `Mutation Category(C>T)`,
+    AG_class    = `Mutation Category(A>G)`
+  )
+
+pq <- file.path(data_dir, "poolq_outputs")
+f_AG <- "NP_GPP3155_2902200_Bondeson_20211217_p2.txt"   # pRDA_479, ABE8e (A>G)
+f_CT <- "NP_GPP3154_2902200_Bondeson_20211217_p1.txt"   # pRDA_478, BE3.9  (C>T)
+
+counts_AG <- read.table(file.path(pq, paste0("counts-", f_AG)), sep = "\t", header = TRUE)
+counts_CT <- read.table(file.path(pq, paste0("counts-", f_CT)), sep = "\t", header = TRUE)
+
+# log2((count / sample total) * 1e6 + 1), applied to every sample column
+counts_to_log2rpm <- function(counts) {
+  m <- as.matrix(counts[, -(1:2)])
+  log2(sweep(m, 2, colSums(m), "/") * 1e6 + 1)
+}
+
+# Check against PoolQ's own normalised output
+check_vs_poolq <- function(counts, f) {
+  ln <- read.table(file.path(pq, paste0("lognorm-", f)), sep = "\t", header = TRUE)
+  stopifnot(identical(counts$Construct.Barcode, ln$Construct.Barcode))
+  max(abs(counts_to_log2rpm(counts) - as.matrix(ln[, -(1:2)])))
+}
+stopifnot(check_vs_poolq(counts_AG, f_AG) < 1e-8,
+          check_vs_poolq(counts_CT, f_CT) < 1e-8)
+
+# Long format. Plate 1 carries four pDNA aliquots under GPP placeholder names
+# ("please spike in pDNA*"); all pDNA columns are labelled Day 0 and averaged
+# where a Day 0 value is needed (ED Fig 1C only; every LFC is relative to Day 4).
+read_lnRPM <- function(counts, editor_label) {
+  counts[, -(1:2)] <- counts_to_log2rpm(counts)
+  counts %>%
+    rename(pDNA = please.spike.in.pDNA_empty, sequence = Construct.Barcode) %>%
+    select(-Construct.IDs) %>%
+    pivot_longer(cols = -sequence, names_to = "Timepoint", values_to = "log2_rpm") %>%
+    mutate(editor = editor_label)
+}
+
+lRPM <- bind_rows(
+  read_lnRPM(counts_AG, "A.G"),
+  read_lnRPM(counts_CT, "C.T")
+) %>%
+  mutate(Timepoint = if_else(
+    Timepoint %in% c("pDNA", "please.spike.in.pDNA_exclude.",
+                     "please.spike.in.pDNA_e", "please.spike.in.pDNA"),
+    "Rep.A.Day.0", Timepoint
+  )) %>%
+  separate_wider_delim(Timepoint, delim = ".",
+                       names = c("fill1", "replicate", "fill2", "day")) %>%
+  select(-fill1, -fill2) %>%
+  mutate(day = as.numeric(day)) %>%
+  arrange(day)
+```
+
+
+## sgRNA mapping
+
+```{r sgrna_mapping}
+# Split targets by editor, then combine
+sgRNA_map_raw <- bind_rows(
+  sgRNA_targets_full %>%
+    select(gene, sequence, strand, sgRNA_pos_nt,
+           edit = AG_edit, class = AG_class) %>%
+    mutate(target_aa = as.numeric(str_extract(edit, "\\d+")), editor = "A.G"),
+  sgRNA_targets_full %>%
+    select(gene, sequence, strand, sgRNA_pos_nt,
+           edit = CT_edit, class = CT_class) %>%
+    mutate(target_aa = as.numeric(str_extract(edit, "\\d+")), editor = "C.T")
+)
+
+# Record whether the aa position came straight from a GPP predicted edit or
+# had to be imputed - this distinction is reported in the supplement.
+sgRNA_map_raw <- sgRNA_map_raw %>%
+  mutate(aa_directly_predicted = !is.na(target_aa))
+
+# Nearest-neighbour imputation: for guides without a predicted edit, assign
+# the amino acid position of the nearest guide on the same strand.
+find_closest_sgRNA <- function(row, df = sgRNA_map_raw) {
+  nt  <- df$sgRNA_pos_nt[row]
+  ori <- df$strand[row]
+  if (!(df$gene[row] %in% c("XPR1", "KIDINS220"))) return(df[row, ])
+  if (!is.na(df$target_aa[row])) return(df[row, ])
+  new_aa <- df %>%
+    filter(!is.na(target_aa), strand == ori) %>%
+    mutate(dist = abs(sgRNA_pos_nt - nt)) %>%
+    arrange(dist) %>%
+    slice(1) %>%
+    pull(target_aa)
+  df[row, ] %>% mutate(target_aa = new_aa)
+}
+
+sgRNA_map_imputed <- map_dfr(seq_len(nrow(sgRNA_map_raw)), find_closest_sgRNA)
+
+# Simplify class strings
+simplify_class <- function(x) {
+  x %>%
+    str_replace_all("Intron, |, Intron| Intron, |,Intron", "") %>%
+    str_replace_all("Silent, |, Silent| Silent, ", "") %>%
+    str_replace_all("Missense, Missense.*|Silent, Missense", "Missense") %>%
+    str_replace_all("Silent, Nonsense|Missense, Nonsense|Nonsense, Missense|Nonsense, Nonsense",
+                    "Nonsense") %>%
+    str_replace_all("Splice-acceptor, Missense|Intron, Splice-acceptor", "Splice-acceptor") %>%
+    str_replace_all("Missense, Splice-donor", "Splice-donor") %>%
+    str_replace_all("UTR, UTR.*", "UTR")
+}
+
+sgRNA_map <- sgRNA_map_imputed %>%
+  mutate(class = simplify_class(class),
+         class = replace_na(class, "No edit")) %>%
+  left_join(gene_annotations, by = "gene") %>%
+  mutate(domain = case_when(
+    gene == "KIDINS220" & target_aa <= 500  ~ "Ank",
+    gene == "KIDINS220" & target_aa <= 1200 ~ "TM",
+    gene == "KIDINS220" & target_aa > 1200  ~ "Disordered",
+    gene == "XPR1"      & target_aa < 224   ~ "SPX",
+    gene == "XPR1"      & target_aa <= 440  ~ "Core",
+    gene == "XPR1"      & target_aa > 440   ~ "EXS"
+  )) %>%
+  # Assign human-readable sgRNA names (sgX<aa> / sgK<aa>, with _A/_B suffix if
+  # multiple guides target the same residue)
+  mutate(base_name = if_else(gene == "XPR1",
+                             str_c("sgX", target_aa),
+                             str_c("sgK", target_aa))) %>%
+  group_by(base_name) %>%
+  mutate(
+    n_seqs  = n_distinct(sequence),
+    seq_rank = dense_rank(sequence),
+    sgName  = if_else(n_seqs > 1,
+                      paste0(base_name, "_", LETTERS[seq_rank]),
+                      base_name)
+  ) %>%
+  ungroup() %>%
+  select(-base_name, -n_seqs, -seq_rank)
+
+sgRNA_map %>% write_csv(here("results", "sgRNA_map_positions_and_domains.csv"))
+```
+
+## LFC calculation
+
+```{r lfc_calc}
+# Baseline: mean log2_rpm at Day 4 across replicates
+day4_baseline <- lRPM %>%
+  filter(day == 4) %>%
+  group_by(sequence, editor) %>%
+  summarise(etp_rpm = mean(log2_rpm), .groups = "drop")
+
+# LFC relative to Day 4
+lfc_long <- lRPM %>%
+  filter(day != 0) %>%
+  left_join(day4_baseline, by = c("sequence", "editor")) %>%
+  mutate(lfc = log2_rpm - etp_rpm) %>%
+  select(-log2_rpm, -etp_rpm)
+
+# Per-day negative-control thresholds (median - 2 SD)
+neg_ctl_thresholds <- lfc_long %>%
+  left_join(sgRNA_map %>% select(sequence, editor, annotation) %>% distinct(),
+            by = c("sequence", "editor")) %>%
+  filter(annotation == "Negative Control") %>%
+  group_by(day, editor) %>%
+  summarise(ctl_med = median(lfc), ctl_sd = sd(lfc),
+            cut_off = ctl_med - 2 * ctl_sd, .groups = "drop")
+
+# Per-sgRNA average LFC, joined to thresholds + map
+lfc_avg <- lfc_long %>%
+  group_by(sequence, editor, day) %>%
+  summarise(lfc_avg = round(median(lfc), 3), .groups = "drop") %>%
+  left_join(neg_ctl_thresholds, by = c("day", "editor")) %>%
+  mutate(score = lfc_avg < cut_off) %>%
+  left_join(sgRNA_map, by = c("sequence", "editor"))
+```
+
+
+---
+
+# Extended Data Figure 1
+
+## ED Fig 1A - Screen coverage
+
+```{r coverage, fig.height=3, fig.width=4}
+protein_lengths <- tibble(gene = c("XPR1", "KIDINS220"), total_aa = c(696, 1771))
+
+coverage <- sgRNA_map %>%
+  filter(!is.na(edit), edit != "NA", edit != "") %>%
+  separate_rows(edit, sep = ",\\s*") %>%
+  mutate(
+    aa = parse_number(edit),
+    aa_orig = str_sub(edit, 1, 3),
+    aa_new  = str_sub(edit, -3)
+  ) %>%
+  filter(aa_orig != aa_new, gene %in% c("XPR1", "KIDINS220")) %>%
+  group_by(gene) %>%
+  summarise(unique_pos = n_distinct(aa), .groups = "drop") %>%
+  left_join(protein_lengths) %>%
+  mutate(pct = unique_pos / total_aa * 100,
+         lbl = paste0(unique_pos, " / ", total_aa, "\n(", round(pct, 1), "%)"))
+
+ggplot(coverage, aes(x = gene, y = pct, fill = gene)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = lbl), vjust = -0.4, fontface = "bold", size = 3.5) +
+  scale_fill_manual(values = c("XPR1" = "#f16913", "KIDINS220" = "#4292c6")) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(c(0, 0.15))) +
+  publication_theme + theme(legend.position = "none") +
+  labs(x = NULL, y = "% Residues Mutated", title = "Screen Coverage")
+
+ggsave(here("results", "edfig1a_coverage.pdf"), height = 3, width = 2.5)
+```
+
+## ED Fig 1B - Library complexity vs DMS
+
+```{r library_complexity, fig.height=3.5, fig.width=4.5}
+sat_labels <- protein_lengths %>%
+  mutate(theoretical = total_aa * 19,
+         sat_lbl = paste0("Saturating\n= ", comma(theoretical)))
+
+edit_cats <- sgRNA_map %>%
+  filter(!is.na(edit), edit != "NA", edit != "",
+         gene %in% c("XPR1", "KIDINS220")) %>%
+  separate_rows(edit, sep = ",\\s*") %>%
+  mutate(silent = str_sub(edit, 1, 3) == str_sub(edit, -3)) %>%
+  filter(!silent) %>%
+  group_by(gene, edit) %>%
+  summarise(editors = list(unique(editor)), .groups = "drop") %>%
+  mutate(category = case_when(
+    map_lgl(editors, ~ all(c("A.G","C.T") %in% .x)) ~ "Shared (Both)",
+    map_lgl(editors, ~ "A.G" %in% .x)               ~ "A.G Only",
+    map_lgl(editors, ~ "C.T" %in% .x)               ~ "C.T Only",
+    TRUE ~ "Other"
+  )) %>%
+  count(gene, category)
+
+totals <- edit_cats %>%
+  group_by(gene) %>% summarise(total = sum(n)) %>%
+  left_join(sat_labels)
+
+ggplot(edit_cats, aes(x = gene, y = n, fill = category)) +
+  geom_col(position = "stack", width = 0.6) +
+  geom_text(data = totals, aes(x = gene, y = total, label = comma(total)),
+            inherit.aes = FALSE, vjust = -0.4, fontface = "bold") +
+  geom_label(data = totals,
+             aes(x = gene, y = total + max(totals$total) * 0.15, label = sat_lbl),
+             inherit.aes = FALSE, fill = "white", color = "grey30", size = 2.8) +
+  scale_fill_manual(values = c("A.G Only" = "#084594", "C.T Only" = "#d94801",
+                               "Shared (Both)" = "#756bb1")) +
+  scale_y_continuous(labels = comma, expand = expansion(c(0, 0.3))) +
+  publication_theme +
+  labs(x = NULL, y = "Unique Edits", fill = "Edit Source",
+       title = "Library Complexity vs. Saturating Mutagenesis")
+
+ggsave(here("results", "edfig1b_library_complexity.pdf"), height = 3.5, width = 4.5)
+```
+
+## ED Fig 1C - Replicate correlations
+
+```{r replicate_cors, fig.height=4.5, fig.width=4.5}
+wide_rpm <- lRPM %>%
+  mutate(time_label = if_else(day == 0, "pDNA", as.character(day))) %>%
+  pivot_wider(id_cols = sequence,
+              names_from  = c(editor, time_label, replicate),
+              names_sep   = "_",
+              values_from = log2_rpm,
+              values_fn   = mean)
+
+cor_mat <- wide_rpm %>%
+  select(-sequence) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  melt()
+
+ordered_lvls <- tibble(label = unique(c(as.character(cor_mat$Var1),
+                                        as.character(cor_mat$Var2)))) %>%
+  separate(label, into = c("Ed", "Time", "Rep"), sep = "_", remove = FALSE) %>%
+  mutate(t_num = case_when(Time == "pDNA" ~ 0, TRUE ~ as.numeric(Time))) %>%
+  arrange(t_num, Ed, Rep) %>%
+  pull(label)
+
+cor_mat %>%
+  mutate(Var1 = factor(Var1, ordered_lvls),
+         Var2 = factor(Var2, ordered_lvls)) %>%
+  ggplot(aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  scale_fill_gradientn(
+    colors = c("#2166ac", "#2166ac", "white", "#b2182b", "#67001f"),
+    values = c(0, 0.69, 0.70, 0.90, 1),
+    limits = c(0, 1), name = "Pearson r"
+  ) +
+  coord_fixed() +
+  publication_theme +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+        axis.text.y = element_text(size = 7),
+        axis.title  = element_blank(), panel.grid = element_blank()) +
+  labs(title = "ED Fig 1C: Replicate Correlation")
+
+ggsave(here("results", "edfig1c_replicate_correlation.pdf"), height = 4.5, width = 4.5)
+```
+
+## ED Fig 1D - LFC vs initial representation
+
+```{r lfc_vs_rpm, fig.height=5, fig.width=8}
+lfc_vs_rpm <- lfc_long %>%
+  filter(day %in% c(7, 14, 21)) %>%
+  group_by(sequence, editor, day) %>%
+  summarise(avg_lfc = mean(lfc), .groups = "drop") %>%
+  inner_join(day4_baseline %>% rename(day4_rpm = etp_rpm)) %>%
+  left_join(sgRNA_map %>% select(sequence, editor, annotation) %>% distinct()) %>%
+  mutate(annotation = factor(annotation,
+                             levels = c("Negative Control","Positive Control","XPR1","KIDINS220"))) %>%
+  drop_na(annotation)
+
+ggplot(lfc_vs_rpm, aes(day4_rpm, avg_lfc, color = annotation)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_point(alpha = 0.5, size = 1.2, stroke = NA) +
+  geom_density_2d(color = "black", alpha = 0.5, linewidth = 0.4, bins = 7) +
+  facet_grid(editor ~ day) +
+  scale_color_manual(values = annotation_colors) +
+  publication_theme +
+  theme(legend.title = element_blank()) +
+  labs(x = expression("Day 4 baseline (log"[2]*" RPM)"),
+       y = expression("log"[2]*" Fold Change"),
+       title = "Depletion vs. initial representation (artifact check)")
+
+ggsave(here("results", "edfig1d_lfc_vs_rpm.pdf"), height = 5, width = 8)
+```
+
+## ED Fig 1E - Distribution of scoring sgRNAs
+
+```{r scoring_dist, fig.height=3, fig.width=6}
+scoring_dist <- lfc_avg %>%
+  filter(day == 4 | (day %in% c(7, 14, 21) & score == TRUE)) %>%
+  group_by(editor, day, annotation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(editor, day) %>%
+  mutate(total = sum(n), pct = n / total * 100) %>%
+  ungroup()
+
+totals_dist <- scoring_dist %>% distinct(editor, day, total)
+
+ggplot(scoring_dist, aes(factor(day), pct, fill = annotation)) +
+  geom_col(color = "black", linewidth = 0.3, width = 0.7) +
+  geom_text(data = totals_dist,
+            aes(factor(day), 103, label = total),
+            inherit.aes = FALSE, size = 3.2, fontface = "bold") +
+  facet_wrap(~editor) +
+  scale_y_continuous(limits = c(0, 115), expand = c(0, 0)) +
+  scale_fill_manual(values = annotation_colors) +
+  publication_theme +
+  theme(legend.title = element_blank()) +
+  labs(x = "Day", y = "% sgRNAs",
+       title = "Proportion scoring per timepoint (>2 SD depletion)")
+
+ggsave(here("results", "edfig1e_scoring_distribution.pdf"), height = 3, width = 6)
+```
+
+
+## ED Fig 1E under the mean-of-replicates definition
+
+The scoring counts printed on the **published** ED Fig 1E (A>G 176 / 323 / 299;
+C>T 183 / 257 / 99) come from scoring each sgRNA on the **mean** of its three
+replicate LFCs. Fig 1A-B, the Results text, and Supplementary Table 1 score on the
+**median** (`lfc_avg`, used above), which gives the 211 scoring XPR1 + KIDINS220
+sgRNA. Both use the same cut-off. The panel above is the median version; this
+chunk reproduces the published numbers so the two can be compared.
+
+```{r scoring_dist_mean}
+lfc_avg_mean <- lfc_long %>%
+  group_by(sequence, editor, day) %>%
+  summarise(lfc_mean = mean(lfc), .groups = "drop") %>%
+  left_join(neg_ctl_thresholds %>% select(day, editor, cut_off), by = c("day", "editor")) %>%
+  mutate(score = lfc_mean < cut_off) %>%
+  left_join(sgRNA_map %>% select(sequence, editor, annotation) %>% distinct(),
+            by = c("sequence", "editor"))
+
+scoring_dist_mean <- lfc_avg_mean %>%
+  filter(day == 4 | (day %in% c(7, 14, 21) & score == TRUE)) %>%
+  group_by(editor, day, annotation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(editor, day) %>%
+  mutate(total = sum(n), pct = n / total * 100) %>%
+  ungroup()
+```
+
+---
+
+# Figure 1
+
+## Fig 1A - Scores across protein sequence
+
+```{r p_fig1a, fig.height=4, fig.width=8}
+set.seed(42)   # ggrepel label placement
+plot_df_fig1a <- lfc_avg %>%
+  filter(day == 21, gene %in% c("XPR1", "KIDINS220")) %>%
+  filter(editor == "A.G" | class == "Nonsense") %>%
+  mutate(class_clean = clean_class(class))
+
+# 2SD cutoffs (one per editor)
+co_ag <- plot_df_fig1a %>% filter(editor == "A.G") %>% pull(cut_off) %>% mean(na.rm = TRUE)
+co_ct <- plot_df_fig1a %>% filter(editor == "C.T") %>% pull(cut_off) %>% mean(na.rm = TRUE)
+
+domain_midpoints <- plot_df_fig1a %>%
+  group_by(gene, domain) %>%
+  summarise(target_aa = mean(range(target_aa)), lfc_avg = 0.5, .groups = "drop")
+
+top_hits <- plot_df_fig1a %>%
+  filter(score == TRUE) %>%
+  group_by(domain) %>%
+  slice_min(lfc_avg, n = 4) %>%
+  ungroup()
+
+p_fig1a <- ggplot(plot_df_fig1a, aes(target_aa, lfc_avg, color = domain)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = co_ag, linetype = "dashed", color = "darkgrey", linewidth = 0.4) +
+  geom_hline(yintercept = co_ct, linetype = "dashed", color = "darkgrey", linewidth = 0.4) +
+  geom_point(aes(shape = class_clean), alpha = 0.4, size = 1.5) +
+  geom_text_repel(data = domain_midpoints, aes(label = domain),
+                  fontface = "bold", size = 3.5, nudge_y = 0.2, segment.color = NA) +
+  geom_text_repel(data = top_hits, aes(label = sgName),
+                  size = 2.8, color = "grey20", nudge_y = -0.3,
+                  min.segment.length = 0, segment.size = 0.2, segment.color = "grey50") +
+  facet_wrap(~gene, scales = "free_x") +
+  scale_x_continuous(breaks = seq(0, 2000, 200)) +
+  scale_color_manual(values = domain_colors) +
+  scale_shape_manual(values = c("Silent"=16,"Missense"=18,"Splice"=17,"Nonsense"=15,"Other"=4)) +
+  guides(color = "none") +
+  publication_theme +
+  labs(title = "Fig 1A: Base editor scores across protein",
+       x = "Amino Acid Position", y = expression("Average log"[2]*" FC"),
+       shape = "Mutation class")
+
+p_fig1a
+
+ggsave(here("results", "fig1a_scores_by_position.pdf"), plot = p_fig1a, height = 4, width = 8)
+```
+
+## Fig 1B - Domain enrichment (GSEA-style)
+
+```{r p_fig1b_enrich, fig.height=2.5, fig.width=5}
+enr_df <- lfc_avg %>%
+  filter(editor == "A.G", day == 21, gene %in% c("XPR1","KIDINS220")) %>%
+  select(sequence, lfc_avg, domain) %>%
+  arrange(lfc_avg) %>%
+  drop_na()
+
+domains   <- unique(enr_df$domain)
+n_perm    <- 1000
+set.seed(42)
+
+rank_above_cutoff <- enr_df %>% filter(lfc_avg < co_ag) %>% nrow()
+
+calc_es <- function(df, tgt) {
+  is_hit     <- as.numeric(df$domain == tgt)
+  wts        <- abs(df$lfc_avg) * is_hit
+  sw         <- sum(wts)
+  if (sw == 0) return(rep(0, nrow(df)))
+  cumsum(wts / sw - (1 - is_hit) / (nrow(df) - sum(is_hit)))
+}
+
+obs_curves <- map_dfc(setNames(domains, domains), ~ calc_es(enr_df, .x)) %>%
+  bind_cols(enr_df %>% select(index = lfc_avg) %>% mutate(index = row_number()))
+
+obs_es <- map_dbl(domains, ~ { r <- calc_es(enr_df, .x); r[which.max(abs(r))] }) %>%
+  setNames(domains)
+
+perm_res <- map_dfr(seq_len(n_perm), function(i) {
+  perm <- enr_df %>% mutate(domain = sample(domain))
+  map_dbl(domains, ~ { r <- calc_es(perm, .x); r[which.max(abs(r))] }) %>%
+    setNames(domains) %>% as.list()
+})
+
+stats_df <- tibble(domain = domains, obs = obs_es) %>%
+  rowwise() %>%
+  mutate(
+    pv       = mean(abs(perm_res[[domain]]) >= abs(obs)),
+    avg_null = if (obs > 0) mean(perm_res[[domain]][perm_res[[domain]] > 0])
+               else         mean(perm_res[[domain]][perm_res[[domain]] < 0]),
+    nes      = obs / abs(avg_null),
+    sig      = case_when(pv < 0.001 ~ "***", pv < 0.01 ~ "**",
+                         pv < 0.05  ~ "*",   TRUE       ~ "ns"),
+    lbl      = paste0(domain, " (NES: ", round(nes, 2), " ", sig, ")")
+  ) %>%
+  ungroup()
+
+legend_map <- setNames(stats_df$lbl, stats_df$domain)
+
+p_fig1b_enrich <- obs_curves %>%
+  pivot_longer(-index, names_to = "domain_type", values_to = "ES") %>%
+  ggplot(aes(index, ES, color = domain_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = rank_above_cutoff, linewidth = 0.4) +
+  scale_color_manual(values = domain_colors, labels = legend_map) +
+  publication_theme +
+  labs(title = "Fig 1B: Domain Enrichment",
+       x = "Ranked sgRNA index (most to least depleted)",
+       y = "Enrichment Score", color = NULL)
+
+p_fig1b_enrich
+
+ggsave(here("results", "fig1b_domain_enrichment.pdf"), plot = p_fig1b_enrich, height = 2.5, width = 5.5)
+```
+
+---
+
+# Source data workbook
+
+One workbook with the raw counts and the data behind each panel, written to
+`results/Figure1_base_editor_screen_source_data.xlsx`.
+
+```{r source_data}
+# Raw counts with PoolQ's original column headers
+raw_counts <- function(f) {
+  read.table(file.path(pq, paste0("counts-", f)), sep = "\t", header = TRUE,
+             check.names = FALSE, quote = "", comment.char = "") %>%
+    select(-`Construct IDs`) %>%
+    rename(sequence = `Construct Barcode`)
+}
+
+sheet_guide <- tribble(
+  ~sheet,               ~contents,
+  "Counts_A>G_ABE8e",   "Raw PoolQ read counts, plate 2 (pRDA_479), 4,039 sgRNA x 13 samples. Columns are Rep A-C at Days 4/7/14/21 plus one pDNA column ('please spike in pDNA_empty' is GPP's placeholder name for the plasmid library).",
+  "Counts_C>T_BE3.9",   "Raw PoolQ read counts, plate 1 (pRDA_478), 4,039 sgRNA x 15 samples. Day 14 has two replicates (A, B). The four 'please spike in pDNA*' columns are pDNA aliquots sequenced at different depths; they are averaged as Day 0.",
+  "sgRNA_annotation",   "One row per sgRNA per editor: gene, control class, predicted amino acid edit, mutation class, estimated amino acid position, domain, display name.",
+  "Fig1A",              "Fig 1A: Day 21 depletion (median log2 fold change vs Day 4, three replicates) of every plotted sgRNA, with the 2-SD scoring cut-off (median - 2 SD of negative-control sgRNA, per editor).",
+  "Fig1B_curves",       "Fig 1B: running enrichment score along the sgRNA list ranked by Day 21 depletion (A>G editor), one column per domain.",
+  "Fig1B_stats",        "Fig 1B: maximum enrichment score, normalised enrichment score (NES) and permutation p-value per domain (1,000 permutations, seed 42).",
+  "Fig1B_cutoff",       "Fig 1B: rank of the last sgRNA below the Day 21 2-SD cut-off (the vertical line).",
+  "EDFig1A",            "ED Fig 1A: residues with at least one predicted amino acid change, per protein.",
+  "EDFig1B",            "ED Fig 1B: unique amino acid edits by editor, against the saturating library.",
+  "EDFig1C",            "ED Fig 1C: Pearson correlation of log2 RPM between samples (long format).",
+  "EDFig1D",            "ED Fig 1D: mean log2 fold change vs Day 4 baseline log2 RPM, per sgRNA, editor and day.",
+  "EDFig1E",            "ED Fig 1E: sgRNA per timepoint (Day 4 = whole library; Days 7/14/21 = scoring sgRNA only), by class. Scored on the median of replicate LFCs, as in Fig 1A-B and Supplementary Table 1.",
+  "EDFig1E_mean_of_reps", "ED Fig 1E as published: same layout, scored on the MEAN of replicate LFCs (see the 'ED Fig 1E under the mean-of-replicates definition' section of the analysis)."
+)
+
+guide_cols <- c("sequence", "editor", "gene", "annotation", "domain", "sgName",
+                "edit", "class", "target_aa", "aa_directly_predicted",
+                "strand", "sgRNA_pos_nt")
+
+write_xlsx(
+  list(
+    README              = sheet_guide,
+    `Counts_A>G_ABE8e`  = raw_counts(f_AG),
+    `Counts_C>T_BE3.9`  = raw_counts(f_CT),
+    sgRNA_annotation    = sgRNA_map %>% select(all_of(guide_cols)),
+    Fig1A               = plot_df_fig1a %>%
+      select(sgName, sequence, editor, gene, domain, target_aa, edit, class,
+             class_clean, day, lfc_avg, cut_off, score),
+    Fig1B_curves        = obs_curves %>% relocate(index),
+    Fig1B_stats         = stats_df %>% select(domain, max_ES = obs, NES = nes,
+                                              perm_p = pv, significance = sig),
+    Fig1B_cutoff        = tibble(rank_of_last_sgRNA_below_cutoff = rank_above_cutoff),
+    EDFig1A             = coverage %>% select(gene, residues_mutated = unique_pos,
+                                              total_residues = total_aa, pct),
+    EDFig1B             = edit_cats %>% left_join(sat_labels %>%
+                             select(gene, saturating_library = theoretical), by = "gene"),
+    EDFig1C             = cor_mat %>% rename(sample_1 = Var1, sample_2 = Var2,
+                                             pearson_r = value),
+    EDFig1D             = lfc_vs_rpm %>% select(sequence, editor, day, annotation,
+                                                day4_log2rpm = day4_rpm, mean_lfc = avg_lfc),
+    EDFig1E             = scoring_dist,
+    EDFig1E_mean_of_reps = scoring_dist_mean
+  ),
+  here("results", "Figure1_base_editor_screen_source_data.xlsx")
+)
+```
+
+# Computed values against the paper
+
+Numbers quoted in the Results text and figures, recomputed from the counts.
+
+```{r paper_check}
+sc21 <- lfc_avg %>%
+  filter(day == 21, editor == "A.G", gene %in% c("XPR1", "KIDINS220"), score)
+
+dist_n <- function(ed, d) scoring_dist %>% filter(editor == ed, day == d) %>% pull(total) %>% unique()
+nes    <- function(d) stats_df %>% filter(domain == d) %>% pull(nes) %>% round(2)
+
+dist_n_mean <- function(ed, d) scoring_dist_mean %>% filter(editor == ed, day == d) %>% pull(total) %>% unique()
+sc21_mean <- lfc_avg_mean %>% filter(day == 21, editor == "A.G", score, annotation %in% c("XPR1", "KIDINS220"))
+
+chk <- function(item, computed, paper, note = "") {
+  tibble(item = item, computed = as.character(computed), paper = as.character(paper), note = note)
+}
+
+paper_check <- bind_rows(
+  chk("sgRNA per editor library (ED Fig 1E, Day 4)", dist_n("A.G", 4), 4039),
+  chk("XPR1 sgRNA in library (Methods)", n_distinct(sgRNA_map$sequence[sgRNA_map$gene == "XPR1"]), 1011),
+  chk("KIDINS220 sgRNA in library (Methods)", n_distinct(sgRNA_map$sequence[sgRNA_map$gene == "KIDINS220"]), 2435),
+  chk("Scoring A>G sgRNA, XPR1 + KIDINS220, Day 21 (Fig 1B)", nrow(sc21), 211),
+  chk("  of which XPR1 (Results)", sum(sc21$gene == "XPR1"), 114),
+  chk("  of which KIDINS220 (Results)", sum(sc21$gene == "KIDINS220"), 97),
+  chk("KIDINS220 residues mutated (ED Fig 1A)", coverage$unique_pos[coverage$gene == "KIDINS220"], 1359),
+  chk("XPR1 residues mutated (ED Fig 1A)", coverage$unique_pos[coverage$gene == "XPR1"], 511),
+  chk("Unique edits KIDINS220 (ED Fig 1B)", sum(edit_cats$n[edit_cats$gene == "KIDINS220"]), 2028),
+  chk("Unique edits XPR1 (ED Fig 1B)", sum(edit_cats$n[edit_cats$gene == "XPR1"]), 774),
+  chk("Scoring sgRNA A>G Day 7 / 14 / 21, median of replicates (ED Fig 1E)",
+      paste(dist_n("A.G", 7), dist_n("A.G", 14), dist_n("A.G", 21), sep = " / "), "176 / 323 / 299",
+      "published panel was scored on the mean of replicates; see next rows"),
+  chk("Scoring sgRNA C>T Day 7 / 14 / 21, median of replicates (ED Fig 1E)",
+      paste(dist_n("C.T", 7), dist_n("C.T", 14), dist_n("C.T", 21), sep = " / "), "183 / 257 / 99",
+      "as above"),
+  chk("Scoring sgRNA A>G Day 7 / 14 / 21, MEAN of replicates (ED Fig 1E)",
+      paste(dist_n_mean("A.G", 7), dist_n_mean("A.G", 14), dist_n_mean("A.G", 21), sep = " / "), "176 / 323 / 299",
+      "reproduces the published panel"),
+  chk("Scoring sgRNA C>T Day 7 / 14 / 21, MEAN of replicates (ED Fig 1E)",
+      paste(dist_n_mean("C.T", 7), dist_n_mean("C.T", 14), dist_n_mean("C.T", 21), sep = " / "), "183 / 257 / 99",
+      "reproduces the published panel"),
+  chk("XPR1 + KIDINS220 among Day 21 A>G scoring sgRNA, MEAN of replicates", nrow(sc21_mean), 211,
+      "legend says 211 of the 299; 211 is the median-based count (299 is mean-based)"),
+  chk("NES SPX (Fig 1B)", nes("SPX"), 1.93),
+  chk("NES Core (Fig 1B)", nes("Core"), 1.49),
+  chk("NES channel/EXS (Fig 1B)", nes("EXS"), 1.54),
+  chk("NES Ank (Fig 1B)", nes("Ank"), 0.84),
+  chk("NES TM (Fig 1B)", nes("TM"), 0.61)
+) %>% mutate(match = computed == paper)
+
+knitr::kable(paper_check)
+```
+
+# Session info
+
+```{r session}
+sessionInfo()
+```

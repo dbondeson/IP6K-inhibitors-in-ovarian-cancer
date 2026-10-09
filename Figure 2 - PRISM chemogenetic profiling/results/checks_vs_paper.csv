@@ -1,0 +1,55 @@
+panel,quantity,recomputed,expected,source,match
+Sushi,fold changes recomputed from normalized counts: max |difference| over all conditions,5.3291e-15,0,Sushi l2fc.csv,TRUE
+Sushi,fold changes compared (of those in l2fc.csv),3339,3339,Sushi l2fc.csv,TRUE
+Fig 2C,cell lines screened,475,475,Fig 2C legend,TRUE
+ED Fig 3C,most cell lines missing from any PCR well,5,5,ED Fig 3C legend: 5 or fewer,TRUE
+ED Fig 3C,cell lines in pool 1 and pool 2,236 / 241,236 / 241,ED Fig 3C panel,TRUE
+Fig 2D,cell lines with an expression profile,472,472,"Fig 2C legend, Methods",TRUE
+Fig 2D,"cell lines, Gyn. SLC34A2-high",16,16,Fig 2D panel,TRUE
+Fig 2D,"cell lines, Other SLC34A2-high",12,12,Fig 2D panel,TRUE
+Fig 2D,"cell lines, Gyn. SLC34A2-low",36,36,Fig 2D panel,TRUE
+Fig 2D,"cell lines, Other SLC34A2-low",408,408,Fig 2D panel,TRUE
+Fig 2D,"Pearson R, RBD27 against SC919 AUC",0.81073,0.81,Fig 2D panel; Results,TRUE
+Fig 2D,p < 0.001,TRUE,TRUE,Fig 2D panel,TRUE
+Fig 2E,"U-test p, RBD27 Gyn. SLC34A2-high vs reference",1.0574e-05,1.1e-05,Fig 2E panel,TRUE
+Fig 2E,"U-test p, RBD27 Gyn. SLC34A2-low vs reference",0.52045,0.52,Fig 2E panel,TRUE
+Fig 2E,"U-test p, RBD27 Other SLC34A2-high vs reference",0.0029607,0.003,Fig 2E panel,TRUE
+Fig 2E,"U-test p, SC919 Gyn. SLC34A2-high vs reference",0.0029886,0.003,Fig 2E panel,TRUE
+Fig 2E,"U-test p, SC919 Gyn. SLC34A2-low vs reference",0.72156,0.721,Fig 2E panel,TRUE
+Fig 2E,"U-test p, SC919 Other SLC34A2-high vs reference",0.016089,0.016,Fig 2E panel,TRUE
+Fig 2F,genes of the biomarker output (CRISPR and expression) found in the recomputed table,9496,9496,PRISM biomarker output,TRUE
+Fig 2F,"recomputed vs biomarker output, max |difference in r|",5.8612e-06,0,PRISM biomarker output,TRUE
+ED Fig 3D,"Pearson r, XPR1 with RBD27 AUC",-0.051977,-0.05,ED Fig 3D panel,FALSE
+ED Fig 3D,"Pearson r, XPR1 with SC919 AUC",-0.058813,-0.057,ED Fig 3D panel,FALSE
+ED Fig 3D,"Pearson r, SLC20A1 with RBD27 AUC",0.042043,0.042,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SLC20A1 with SC919 AUC",0.011696,0.012,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SLC20A2 with RBD27 AUC",-0.10258,-0.102,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SLC20A2 with SC919 AUC",-0.13403,-0.134,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SLC34A2 with RBD27 AUC",-0.34276,-0.343,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SLC34A2 with SC919 AUC",-0.23355,-0.233,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SYNJ2 with RBD27 AUC",0.18915,0.189,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SYNJ2 with SC919 AUC",0.18281,0.183,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, PAX8 with RBD27 AUC",-0.13644,-0.137,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, PAX8 with SC919 AUC",-0.042887,-0.043,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (3000nM) with RBD27 AUC",0.7504,0.75,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (3000nM) with SC919 AUC",0.80831,0.808,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (1000nM) with RBD27 AUC",0.71951,0.72,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (1000nM) with SC919 AUC",0.82548,0.825,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (300nM) with RBD27 AUC",0.63129,0.631,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (300nM) with SC919 AUC",0.82601,0.826,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (100nM) with RBD27 AUC",0.36723,0.367,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, SC919 (100nM) with SC919 AUC",0.59769,0.598,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (2000nM) with RBD27 AUC",0.85952,0.86,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (2000nM) with SC919 AUC",0.74891,0.749,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (670nM) with RBD27 AUC",0.87866,0.879,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (670nM) with SC919 AUC",0.73134,0.731,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (220nM) with RBD27 AUC",0.84158,0.842,ED Fig 3D panel,TRUE
+ED Fig 3D,"Pearson r, RBD27 (220nM) with SC919 AUC",0.70183,0.702,ED Fig 3D panel,TRUE
+ED Fig 3D,cell lines in the heatmap,472,472,ED Fig 3D axis,TRUE
+ED Fig 3B,cell lines for most genes,1186,1186,ED Fig 3B legend,TRUE
+ED Fig 3B,cell lines for NUDT4,45,45,ED Fig 3B legend,TRUE
+ED Fig 3E,PRISM cell lines with CRISPR data,400,400,DepMap 25Q3,TRUE
+ED Fig 3F,the ten labelled compounds are the top five and bottom five,AZ20; CEP-32496; DEPRODONE PROPIONATE; EDITOL; IPI549; OCLACITINIB; PD-407824; PENFLURIDOL; SAR125844; SNDX-5613,AZ20; CEP-32496; DEPRODONE PROPIONATE; EDITOL; IPI549; OCLACITINIB; PD-407824; PENFLURIDOL; SAR125844; SNDX-5613,ED Fig 3F panel,TRUE
+ED Fig 3F,compounds plotted,284,284,PRISM biomarker output,TRUE
+ED Fig 3F,title: correlation of RBD27 and SC919 AUC,0.81073,0.81,ED Fig 3F panel title (= Fig 2D),TRUE
+ED Fig 3F,largest |correlation| of another compound with either drug is below 0.3,TRUE,TRUE,ED Fig 3F panel,TRUE

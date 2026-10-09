@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+.Rhistory
+.RData
+Rplots.pdf
+# the input data are on Figshare; download them into each folder's data/ directory
+*/data/*
+!*/data/README.md

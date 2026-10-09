@@ -1,0 +1,10 @@
+panel,quantity,recomputed,expected,expected_source,match
+Animals,IP mice randomized (SC919 / vehicle),8 / 7,8 / 7,Randomization_IP_d14 sheet,True
+Animals,IP mice analysed (SC919 / vehicle),5 / 7,5 / 7,Fig 3C legend,True
+Fig 3D,Spearman R,0.72,0.72,Fig 3D panel and legend,True
+Fig 3D,Spearman p,0.00824,0.00824,Fig 3D panel (the legend prints 6.24e-3),True
+Fig 3F / Results,"median unique clones, vehicle",25740.0,26000,"Results text (~26,000)",True
+Fig 3F / Results,"median unique clones, SC919",2278.0,2300,"Results text (~2,300)",True
+Fig 3F / Results,fold difference in unique clones,11.3,11,Results text (~11-fold),True
+ED Fig 4G,samples in treated heatmap (12 mice x 5 organs),60,60,ED Fig 4G,True
+ED Fig 4G,pre-injection samples,15,15,ED Fig 4G,True

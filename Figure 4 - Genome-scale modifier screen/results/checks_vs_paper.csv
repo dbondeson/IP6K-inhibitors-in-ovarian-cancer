@@ -1,0 +1,8 @@
+panel,quantity,recomputed,expected,source,match
+Fig 4A,"RBD27 average LFC vs GPP portal, max difference over 19752 genes",4.9991e-12,0,GPP portal output,TRUE
+Fig 4A,"RBD27 average -log10 p vs GPP portal, max difference",6.3431e-11,0,GPP portal output,TRUE
+Fig 4A,"SC919 average LFC vs GPP portal, max difference over 19752 genes",4.9869e-12,0,GPP portal output,TRUE
+Fig 4A,"SC919 average -log10 p vs GPP portal, max difference",6.6369e-11,0,GPP portal output,TRUE
+Fig 4A,"Pearson r, RMGI Chronos vs RBD27 average LFC",-0.10045,-0.1,Fig 4A panel,TRUE
+Fig 4A,"Pearson r, RMGI Chronos vs SC919 average LFC",-0.036903,-0.037,Fig 4A panel,TRUE
+Fig 4A,"Pearson r, RBD27 vs SC919 average LFC",0.29446,0.295,Fig 4A panel,TRUE
